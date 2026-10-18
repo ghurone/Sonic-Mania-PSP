@@ -84,6 +84,9 @@ void UIWidgets_ApplyLanguage(void)
         case LANGUAGE_SC: UIWidgets->textFrames = RSDK.LoadSpriteAnimation("UI/TextSC.bin", SCOPE_STAGE); break;
         case LANGUAGE_TC: UIWidgets->textFrames = RSDK.LoadSpriteAnimation("UI/TextTC.bin", SCOPE_STAGE); break;
 #endif
+#if defined(__psp__)
+        case LANGUAGE_PT: UIWidgets->textFrames = RSDK.LoadSpriteAnimation("UI/TextPT.bin", SCOPE_STAGE); break;
+#endif
         default: break;
     }
 }

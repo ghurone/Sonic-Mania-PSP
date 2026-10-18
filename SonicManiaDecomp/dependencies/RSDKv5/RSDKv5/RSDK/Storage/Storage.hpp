@@ -100,6 +100,9 @@ public:
 };
 
 extern DataStorage dataStorage[DATASET_MAX];
+#if RETRO_PLATFORM == RETRO_PSP
+extern uint32 pspStoragePeak[DATASET_MAX];
+#endif
 
 bool32 InitStorage();
 void ReleaseStorage();

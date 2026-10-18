@@ -24,6 +24,25 @@
 FileIO *fOpen(const char *path, const char *mode);
 #endif
 
+#if RETRO_PLATFORM == RETRO_PSP
+// PSP: files inside the data pack are "views" (a position over one persistent pack handle and a small block cache)
+// instead of an fopen + 1KB newlib buffer per file. Every Memory Stick request costs far more than the bytes it
+// moves, so a scene load was mostly spent issuing thousands of tiny reads. fOpen stays fopen: views come only from
+// OpenDataFile, and these wrappers pass real FILEs (saves, log) straight to stdio.
+#undef fRead
+#undef fSeek
+#undef fTell
+#undef fClose
+size_t PSPFileRead(void *buffer, size_t elementSize, size_t elementCount, FileIO *file);
+int PSPFileSeek(FileIO *file, long offset, int whence);
+long PSPFileTell(FileIO *file);
+int PSPFileClose(FileIO *file);
+#define fRead(buffer, elementSize, elementCount, file) PSPFileRead(buffer, elementSize, elementCount, file)
+#define fSeek(file, offset, whence)                    PSPFileSeek(file, offset, whence)
+#define fTell(file)                                    PSPFileTell(file)
+#define fClose(file)                                   PSPFileClose(file)
+#endif
+
 #include <miniz/miniz.h>
 
 namespace RSDK
@@ -58,6 +77,9 @@ struct FileInfo {
     uint8 eKeyPosA;
     uint8 eKeyPosB;
     uint8 eKeyNo;
+#if RETRO_PLATFORM == RETRO_PSP
+    uint16 pspKeyIndex; // bytes into the key schedule's cycle (see DecryptBytes)
+#endif
 };
 
 struct RSDKFileInfo {
@@ -67,7 +89,15 @@ struct RSDKFileInfo {
     uint8 encrypted;
     uint8 useFileBuffer;
     int32 packID;
+#if RETRO_PLATFORM == RETRO_PSP
+    uint8 pspKind; // Data.psp: PSP_PACK_PLAIN/ENCRYPTED, or PSP_PACK_AT3 (a music track stored as ATRAC3)
+#endif
 };
+#if RETRO_PLATFORM == RETRO_PSP
+enum { PSP_PACK_PLAIN, PSP_PACK_ENCRYPTED, PSP_PACK_AT3 };
+// the pack entry for a path (as OpenDataFile would find it), or NULL
+RSDKFileInfo *PSPFindDataFile(const char *filename);
+#endif
 
 struct RSDKContainer {
     char name[0x100];
@@ -90,6 +120,18 @@ void DetectEngineVersion();
 #endif
 bool32 LoadDataPack(const char *filename, size_t fileOffset, bool32 useBuffer);
 bool32 OpenDataFile(FileInfo *info, const char *filename);
+
+#if RETRO_PLATFORM == RETRO_PSP
+// pack traffic since the last reset, for the per-scene load report
+struct PSPPackStats {
+    uint32 views;       // files opened from the pack
+    uint32 fallbacks;   // opens that found no free view and used fopen
+    uint32 deviceReads; // requests that reached the Memory Stick
+    uint32 bytes;       // bytes those requests moved
+    uint64 ioUS;        // time spent inside them
+};
+extern PSPPackStats pspPackStats;
+#endif
 
 enum FileModes { FMODE_NONE, FMODE_RB, FMODE_WB, FMODE_RB_PLUS };
 
@@ -135,6 +177,9 @@ inline void Seek_Set(FileInfo *info, int32 count)
             info->eKeyPosA    = 0;
             info->eKeyPosB    = 8;
             info->eNybbleSwap = false;
+#if RETRO_PLATFORM == RETRO_PSP
+            info->pspKeyIndex = 0;
+#endif
             SkipBytes(info, count);
         }
 

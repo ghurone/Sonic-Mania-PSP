@@ -165,6 +165,19 @@ extern SceneInfo sceneInfo;
 
 extern uint8 tilesetPixels[TILESET_SIZE * 4];
 
+#if RETRO_PLATFORM == RETRO_PSP
+// Per tile slot (tile | flip << 10, matching "layout & 0xFFF"), one bit per pixel row: the row is fully
+// transparent / fully opaque. Lets DrawLayerHScroll skip or blit whole tile rows without per-pixel tests.
+// A row with neither bit set (or not computed yet) takes the original per-pixel path, so stale-but-zero
+// flags are always safe. Kept in sync by LoadStageGIF, DrawAniTile and CopyTile.
+extern uint16 pspTileRowEmpty[TILE_COUNT * 4];
+extern uint16 pspTileRowOpaque[TILE_COUNT * 4];
+// One bit per row with a single nonzero palette index; colors remain live.
+extern uint16 pspTileRowSolid[TILE_COUNT * 4];
+void PSPUpdateTileFlags(int32 tile, int32 count); // recomputes all 4 flip variants of tiles [tile, tile + count)
+void PSPReportTileDrawProfile();
+#endif
+
 void LoadSceneFolder();
 void LoadSceneAssets();
 void LoadTileConfig(char *filepath);
@@ -307,6 +320,14 @@ inline void CopyTile(uint16 dest, uint16 src, uint16 count)
             *destPixelsXY++ = *srcPixelsXY++;
         }
     }
+
+#if RETRO_PLATFORM == RETRO_PSP
+    // a copy running past the last tile spills into the next flip variant's slots: just redo every tile then
+    if (dest + count > TILE_COUNT)
+        PSPUpdateTileFlags(0, TILE_COUNT);
+    else
+        PSPUpdateTileFlags(dest, count);
+#endif
 }
 
 inline ScanlineInfo *GetScanlines() { return scanlines; }

@@ -27,8 +27,23 @@ DevMenu RSDK::devMenu = DevMenu();
 
 inline void PrintConsole(const char *message) { printf("%s", message); }
 
+#if RETRO_PLATFORM == RETRO_PSP
+static char pspLogBuffer[0x8000];
+static size_t pspLogUsed    = 0;
+static bool pspLogBuffered = false; // false until the first PSPFlushLog(): boot breadcrumbs are written immediately
+// Only test runs (a boot.txt on the card) log anything: every write to the Memory Stick costs ~50ms, and the game wrote
+// a dozen boot lines straight to it (half a second on the first load) plus the buffer at every scene change. Normal
+// play logs nothing at all (not even to RAM). Test runs write log.txt, or keep the newest 32KB in RAM with "nolog".
+int pspLogToCard = 0;
+int pspLogEnabled = 0;
+#endif
+
 void RSDK::PrintLog(int32 mode, const char *message, ...)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    if (!pspLogEnabled)
+        return;
+#endif
 #if !RETRO_DISABLE_LOG
     if (engineDebugMode) {
         // make the full string
@@ -103,6 +118,32 @@ void RSDK::PrintLog(int32 mode, const char *message, ...)
 #endif
         }
 
+#if RETRO_PLATFORM == RETRO_PSP
+        // Opening/appending/closing log.txt on a real Memory Stick stalls the game for ~50ms per line (a hitch on
+        // every enemy kill, achievement or profiler report). Once the first scene starts, lines are kept in RAM
+        // and written out at scene changes (see PSPFlushLog); during boot they still go straight to the card.
+        size_t len = strlen(outputString);
+        if (!pspLogToCard) {
+            if (len > sizeof(pspLogBuffer) / 2)
+                return;
+            if (pspLogUsed + len > sizeof(pspLogBuffer)) { // keep the newer half
+                memmove(pspLogBuffer, &pspLogBuffer[sizeof(pspLogBuffer) / 2], pspLogUsed - sizeof(pspLogBuffer) / 2);
+                pspLogUsed -= sizeof(pspLogBuffer) / 2;
+            }
+            memcpy(&pspLogBuffer[pspLogUsed], outputString, len);
+            pspLogUsed += len;
+            return;
+        }
+        if (pspLogBuffered) {
+            if (pspLogUsed + len > sizeof(pspLogBuffer))
+                PSPFlushLog();
+            if (len <= sizeof(pspLogBuffer)) {
+                memcpy(&pspLogBuffer[pspLogUsed], outputString, len);
+                pspLogUsed += len;
+                return;
+            }
+        }
+#endif
 #if !RETRO_USE_ORIGINAL_CODE && RETRO_PLATFORM != RETRO_ANDROID
         char logPath[0x100];
         sprintf_s(logPath, sizeof(logPath), "%slog.txt", SKU::userFileDir);
@@ -115,6 +156,28 @@ void RSDK::PrintLog(int32 mode, const char *message, ...)
     }
 #endif
 }
+
+#if RETRO_PLATFORM == RETRO_PSP
+// Writes the buffered log lines to log.txt and switches PrintLog to buffered mode. Called while a scene loads
+// (the screen is already static then) and before the game exits.
+void PSPFlushLog()
+{
+    pspLogBuffered = true;
+    if (!pspLogToCard)
+        return; // (kept in RAM)
+    if (!pspLogUsed)
+        return;
+
+    char logPath[0x100];
+    sprintf_s(logPath, sizeof(logPath), "%slog.txt", SKU::userFileDir);
+    FileIO *file = fOpen(logPath, "a");
+    if (file) {
+        fWrite(pspLogBuffer, 1, pspLogUsed, file);
+        fClose(file);
+    }
+    pspLogUsed = 0;
+}
+#endif
 
 #if RETRO_REV02
 void RSDK::AddViewableVariable(const char *name, void *value, int32 type, int32 min, int32 max)

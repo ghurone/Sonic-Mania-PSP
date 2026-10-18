@@ -48,7 +48,11 @@ void RSDK::ClearTrigLookupTables()
 
 void RSDK::CalculateTrigAngles()
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    srand(pspInputMode ? 1 : (uint32)time(NULL)); // recordings replay with the same random numbers
+#else
     srand((uint32)time(NULL));
+#endif
     randSeed = rand();
 
     for (int32 i = 0; i < 0x400; ++i) {

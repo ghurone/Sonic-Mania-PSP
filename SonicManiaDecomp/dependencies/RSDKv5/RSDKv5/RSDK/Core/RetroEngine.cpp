@@ -2,6 +2,10 @@
 
 using namespace RSDK;
 
+#if RETRO_PLATFORM == RETRO_PSP
+extern int pspFrameIndex, pspSceneStartFrame; // PSPRenderDevice.cpp
+#endif
+
 #if RETRO_REV0U
 #include "Legacy/RetroEngineLegacy.cpp"
 #endif
@@ -24,15 +28,32 @@ RetroEngine RSDK::engine = RetroEngine();
 
 int32 RSDK::RunRetroEngine(int32 argc, char *argv[])
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    PrintLog(PRINT_NORMAL, "PSPINIT: ParseArguments");
+#endif
     ParseArguments(argc, argv);
 
     if (engine.consoleEnabled)
         InitConsole();
     RenderDevice::isRunning = false;
 
+#if RETRO_PLATFORM == RETRO_PSP
+    PrintLog(PRINT_NORMAL, "PSPINIT: InitStorage begin");
+#endif
     if (InitStorage()) {
+#if RETRO_PLATFORM == RETRO_PSP
+        PrintLog(PRINT_NORMAL, "PSPINIT: InitStorage done");
+        PrintLog(PRINT_NORMAL, "PSPINIT: InitUserCore begin");
+#endif
         SKU::InitUserCore();
+#if RETRO_PLATFORM == RETRO_PSP
+        PrintLog(PRINT_NORMAL, "PSPINIT: InitUserCore done");
+        PrintLog(PRINT_NORMAL, "PSPINIT: LoadSettingsINI begin");
+#endif
         LoadSettingsINI();
+#if RETRO_PLATFORM == RETRO_PSP
+        PrintLog(PRINT_NORMAL, "PSPINIT: LoadSettingsINI done");
+#endif
 
 #if !RETRO_USE_ORIGINAL_CODE
         // temp fix till i properly figure out what exactly went wrong here
@@ -87,7 +108,13 @@ int32 RSDK::RunRetroEngine(int32 argc, char *argv[])
             return 0;
         }
 
+#if RETRO_PLATFORM == RETRO_PSP
+        PrintLog(PRINT_NORMAL, "PSPINIT: InitEngine begin");
+#endif
         InitEngine();
+#if RETRO_PLATFORM == RETRO_PSP
+        PrintLog(PRINT_NORMAL, "PSPINIT: InitEngine done");
+#endif
 #if RETRO_USE_MOD_LOADER
         // we confirmed the game actually is valid & running, lets start some callbacks
         videoSettings.shaderID = shader;
@@ -95,6 +122,9 @@ int32 RSDK::RunRetroEngine(int32 argc, char *argv[])
         RenderDevice::SetWindowTitle();
         RenderDevice::lastShaderID = -1;
 #else
+#if RETRO_PLATFORM == RETRO_PSP
+        PrintLog(PRINT_NORMAL, "PSPINIT: RenderDevice Init begin");
+#endif
         if (RenderDevice::Init()) {
             RenderDevice::isRunning = true;
         }
@@ -102,6 +132,9 @@ int32 RSDK::RunRetroEngine(int32 argc, char *argv[])
             // No render device, throw a "QUIT" msg onto the message loop and call it a day :)
             SendQuitMsg();
         }
+#if RETRO_PLATFORM == RETRO_PSP
+        PrintLog(PRINT_NORMAL, "PSPINIT: RenderDevice Init done (running=%d)", RenderDevice::isRunning);
+#endif
 #endif
     }
 
@@ -342,8 +375,72 @@ int32 RSDK::RunRetroEngine(int32 argc, char *argv[])
     return 0;
 }
 
+#if RETRO_PLATFORM == RETRO_PSP
+// Loads the scene and logs where the time went, including how much of it was Memory Stick traffic.
+static void PSPLoadScene()
+{
+    memset(&pspPackStats, 0, sizeof(pspPackStats));
+    memset(pspLoadProf, 0, sizeof(pspLoadProf));
+    memset(pspLoadIO, 0, sizeof(pspLoadIO));
+    pspLoadDecryptUS = pspLoadGifUS = 0;
+    unsigned long long t0 = PSPProfNow();
+    LoadSceneFolder();
+    unsigned long long t1 = PSPProfNow(), io1 = pspPackStats.ioUS;
+    LoadSceneAssets();
+    unsigned long long t2 = PSPProfNow(), io2 = pspPackStats.ioUS;
+    InitObjects();
+    unsigned long long t3 = PSPProfNow(), io3 = pspPackStats.ioUS;
+
+    ::pspSceneStartFrame = ::pspFrameIndex; // (late frames after this are logged, see FlipScreen)
+    PrintLog(PRINT_NORMAL, "PSP load %s/%s: total=%ums folder=%ums assets=%ums objects=%ums | pack views=%u fallback=%u reads=%u kb=%u io=%ums",
+             currentSceneFolder, currentSceneID, (uint32)((t3 - t0) / 1000), (uint32)((t1 - t0) / 1000), (uint32)((t2 - t1) / 1000),
+             (uint32)((t3 - t2) / 1000), pspPackStats.views, pspPackStats.fallbacks, pspPackStats.deviceReads, pspPackStats.bytes >> 10,
+             (uint32)(pspPackStats.ioUS / 1000));
+    // the largest block malloc can still give (the C heap takes nearly all RAM at boot, and the pools live inside it)
+    uint32 mallocKB = 0;
+    for (uint32 step = 16384; step; step >>= 1) {
+        void *probe = malloc((size_t)(mallocKB + step) * 1024);
+        if (probe) {
+            free(probe);
+            mallocKB += step;
+        }
+    }
+    PrintLog(PRINT_NORMAL, "PSP heap %s/%s: largest malloc %uKB", currentSceneFolder, currentSceneID, mallocKB);
+    // pools in use now and at their peak (KB): stage, music, sound effects, strings, temporary
+    PrintLog(PRINT_NORMAL, "PSP mem %s/%s: stg=%u/%u (peak %u) mus=%u/%u sfx=%u/%u (peak %u) str=%u/%u tmp=%u/%u (peak %u) | heap free=%uKB (largest %uKB)",
+             currentSceneFolder, currentSceneID, dataStorage[DATASET_STG].usedStorage / 256, dataStorage[DATASET_STG].storageLimit >> 10,
+             pspStoragePeak[DATASET_STG] / 256, pspStoragePeak[DATASET_MUS] / 256, dataStorage[DATASET_MUS].storageLimit >> 10,
+             dataStorage[DATASET_SFX].usedStorage / 256, dataStorage[DATASET_SFX].storageLimit >> 10, pspStoragePeak[DATASET_SFX] / 256,
+             pspStoragePeak[DATASET_STR] / 256, dataStorage[DATASET_STR].storageLimit >> 10, dataStorage[DATASET_TMP].usedStorage / 256,
+             dataStorage[DATASET_TMP].storageLimit >> 10, pspStoragePeak[DATASET_TMP] / 256, (uint32)(sceKernelTotalFreeMemSize() / 1024),
+             (uint32)(sceKernelMaxFreeMemSize() / 1024));
+    PrintLog(PRINT_NORMAL, "PSP load assets: sheets=%ums anims(incl. sheets)=%ums sfx=%ums meshes=%ums statics=%ums defrag=%ums",
+             (uint32)(pspLoadProf[PSPLOAD_SHEET] / 1000), (uint32)(pspLoadProf[PSPLOAD_ANIM] / 1000), (uint32)(pspLoadProf[PSPLOAD_SFX] / 1000),
+             (uint32)(pspLoadProf[PSPLOAD_MESH] / 1000), (uint32)(pspLoadProf[PSPLOAD_STATIC] / 1000), (uint32)(pspLoadProf[PSPLOAD_DEFRAG] / 1000));
+    PrintLog(PRINT_NORMAL, "PSP load io: folder=%ums assets=%ums objects=%ums | sheets=%ums sfx=%ums anims=%ums | decrypt=%ums gif=%ums",
+             (uint32)(io1 / 1000), (uint32)((io2 - io1) / 1000), (uint32)((io3 - io2) / 1000), (uint32)(pspLoadIO[PSPLOAD_SHEET] / 1000),
+             (uint32)(pspLoadIO[PSPLOAD_SFX] / 1000), (uint32)(pspLoadIO[PSPLOAD_ANIM] / 1000), (uint32)(pspLoadDecryptUS / 1000),
+             (uint32)(pspLoadGifUS / 1000));
+
+    PSPFlushUserData(); // scene is loaded and the screen is static: a good time to write files
+    PSPSaveInputRecording();
+    PSPFlushLog();
+}
+#endif
+
+extern char streamFilePath[0x40]; // Audio.cpp
 void RSDK::ProcessEngine()
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    // Gameplay states only touch the framebuffers in ProcessObjectDrawLists (which syncs there, letting the GE
+    // overlap object updates); every other state may draw at any point, so sync up front.
+    switch (sceneInfo.state & ~ENGINESTATE_STEPOVER) {
+        case ENGINESTATE_REGULAR:
+        case ENGINESTATE_PAUSED:
+        case ENGINESTATE_FROZEN: break;
+        default: PSPWaitDisplayList(); break;
+    }
+#endif
     switch (sceneInfo.state) {
         default: break;
 
@@ -356,9 +453,13 @@ void RSDK::ProcessEngine()
                 if (devMenu.modsChanged)
                     RefreshModFolders();
 #endif
+#if RETRO_PLATFORM == RETRO_PSP
+                PSPLoadScene();
+#else
                 LoadSceneFolder();
                 LoadSceneAssets();
                 InitObjects();
+#endif
 
 #if RETRO_REV02
 #if !RETRO_USE_ORIGINAL_CODE
@@ -384,6 +485,66 @@ void RSDK::ProcessEngine()
             break;
 
         case ENGINESTATE_REGULAR:
+#if RETRO_PLATFORM == RETRO_PSP
+        {
+            PSP_PROF_BEGIN(PSPPROF_OBJUPDATE);
+            ProcessInput();
+            ProcessSceneTimer();
+            ProcessObjects();
+            ProcessParallaxAutoScroll();
+
+            // heavy scenes: a second update before drawing (see pspUpdatesPerDraw), with its own pad poll
+            for (int32 u = 1; u < pspUpdatesPerDraw; ++u) {
+                if (sceneInfo.state != ENGINESTATE_REGULAR)
+                    break;
+
+                unsigned long long extraStart = PSPProfNow();
+                ProcessInput();
+                ProcessSceneTimer();
+                ProcessObjects();
+                ProcessParallaxAutoScroll();
+                pspExtraUpdateUS += PSPProfNow() - extraStart;
+                pspFrameUpdates++;
+            }
+
+            for (int32 i = 1; i < engine.gameSpeed; ++i) {
+                if (sceneInfo.state != ENGINESTATE_REGULAR)
+                    break;
+
+                ProcessSceneTimer();
+                ProcessObjects();
+                ProcessParallaxAutoScroll();
+            }
+            SKU::ProcessAchievements();
+            PSP_PROF_END(PSPPROF_OBJUPDATE);
+
+            if (pspMusicTest) {
+                // diagnostics (boot.txt "musictest"): what a jingle does - note the stage track's position, play another
+                // track, then resume the first from that position - every few seconds
+                static int32 timer = 0;
+                static uint32 savedPos = 0;
+                static char savedTrack[0x40];
+                if (++timer == 240) {
+                    int32 ch = 0;
+                    for (int32 c = 0; c < CHANNEL_COUNT; ++c) if (channels[c].state == CHANNEL_STREAM) ch = c;
+                    savedPos = GetChannelPos(ch);
+                    strcpy(savedTrack, streamFilePath + 11); // past "Data/Music/"
+                    PrintLog(PRINT_NORMAL, "PSP musictest: %s at %u, playing Drowning.ogg", savedTrack, savedPos);
+                    PlayStream("Drowning.ogg", ch, 0, 0, true);
+                }
+                else if (timer == 420) {
+                    PrintLog(PRINT_NORMAL, "PSP musictest: resuming %s at %u", savedTrack, savedPos);
+                    PlayStream(savedTrack, 0, savedPos, 1, true);
+                    timer = 0;
+                }
+            }
+
+            PSP_PROF_BEGIN(PSPPROF_DRAW);
+            ProcessObjectDrawLists();
+            PSP_PROF_END(PSPPROF_DRAW);
+            break;
+        }
+#else
             ProcessInput();
             ProcessSceneTimer();
             ProcessObjects();
@@ -404,6 +565,7 @@ void RSDK::ProcessEngine()
             ProcessObjectDrawLists();
 
             break;
+#endif
 
         case ENGINESTATE_PAUSED:
             ProcessInput();
@@ -444,9 +606,13 @@ void RSDK::ProcessEngine()
             if (devMenu.modsChanged)
                 RefreshModFolders();
 #endif
+#if RETRO_PLATFORM == RETRO_PSP
+            PSPLoadScene();
+#else
             LoadSceneFolder();
             LoadSceneAssets();
             InitObjects();
+#endif
 
 #if RETRO_REV02
 #if !RETRO_USE_ORIGINAL_CODE
@@ -758,8 +924,17 @@ void RSDK::StartGameObjects()
 
     for (int32 l = 0; l < DRAWGROUP_COUNT; ++l) engine.drawGroupVisible[l] = true;
 
+#if RETRO_PLATFORM == RETRO_PSP
+    PrintLog(PRINT_NORMAL, "PSPINIT: SetupFunctionTables");
+#endif
     SetupFunctionTables();
+#if RETRO_PLATFORM == RETRO_PSP
+    PrintLog(PRINT_NORMAL, "PSPINIT: InitGameLink");
+#endif
     InitGameLink();
+#if RETRO_PLATFORM == RETRO_PSP
+    PrintLog(PRINT_NORMAL, "PSPINIT: LoadGameConfig (%d classes)", objectClassCount);
+#endif
     LoadGameConfig();
 }
 

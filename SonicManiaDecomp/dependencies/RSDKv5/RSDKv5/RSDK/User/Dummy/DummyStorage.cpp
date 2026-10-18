@@ -26,9 +26,30 @@ int32 DummyUserStorage::TryInitStorage()
     }
     return storageStatus;
 }
+#if RETRO_PLATFORM == RETRO_PSP
+#include <psputility_sysparam.h>
+#endif
+
 bool32 DummyUserStorage::GetUsername(String *name)
 {
 #if !RETRO_USE_ORIGINAL_CODE
+#if RETRO_PLATFORM == RETRO_PSP
+    // settings.ini's username if set, else the console's nickname (System Settings > Nickname); the game's font only
+    // has ASCII, so other characters are left out ("Ghu" if nothing is left)
+    if (!customSettings.username[0]) {
+        char nickname[0x80];
+        if (sceUtilityGetSystemParamString(PSP_SYSTEMPARAM_ID_STRING_NICKNAME, nickname, sizeof(nickname)) == 0) {
+            int32 len = 0;
+            for (const char *c = nickname; *c && len < (int32)sizeof(customSettings.username) - 1; ++c) {
+                if (*c >= 0x20 && *c < 0x7F)
+                    customSettings.username[len++] = *c;
+            }
+            customSettings.username[len] = 0;
+        }
+        if (!customSettings.username[0])
+            strcpy(customSettings.username, "Ghu");
+    }
+#endif
     if (strlen(customSettings.username) > 0)
         InitString(name, customSettings.username, 0);
     else

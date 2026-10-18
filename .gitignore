@@ -1,0 +1,42 @@
+# Sonic Mania PSP
+
+# fora do repositório: testes, builds prontos, arquivos do jogo e configurações do editor
+testes/
+dist/
+assets/
+github/
+.vscode/
+
+# o que a compilação gera
+*.o
+*.d
+psp/EBOOT.PBP
+psp/PARAM.SFO
+psp/*.elf
+psp/*.prx
+
+# ícone, fundo e som do menu do PSP: cada um coloca os seus (feitos da arte e da música do jogo, não são distribuídos)
+psp/ICON0.PNG
+psp/PIC1.PNG
+psp/SND0.AT3
+
+# ferramentas: o atracdenc (programa de terceiros, cada um baixa o seu), cache do Python e utilitários só de testes
+tools/__pycache__/
+tools/atracdenc/
+tools/psp_load_order.txt
+tools/patch_engine.py
+tools/make_load_order.py
+
+# arquivos do jogo e o que a conversão gera a partir deles
+Data.rsdk
+Data.psp
+*.at3
+
+# dos submódulos do motor, só o que ele usa
+SonicManiaDecomp/dependencies/RSDKv5/dependencies/all/stb_vorbis/*
+!SonicManiaDecomp/dependencies/RSDKv5/dependencies/all/stb_vorbis/stb_vorbis.c
+!SonicManiaDecomp/dependencies/RSDKv5/dependencies/all/stb_vorbis/LICENSE
+SonicManiaDecomp/dependencies/RSDKv5/dependencies/all/tinyxml2/*
+!SonicManiaDecomp/dependencies/RSDKv5/dependencies/all/tinyxml2/tinyxml2.cpp
+!SonicManiaDecomp/dependencies/RSDKv5/dependencies/all/tinyxml2/tinyxml2.h
+!SonicManiaDecomp/dependencies/RSDKv5/dependencies/all/tinyxml2/LICENSE.txt

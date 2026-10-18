@@ -14,6 +14,203 @@ int32 RSDK::globalObjectIDs[OBJECT_COUNT];
 int32 RSDK::stageObjectIDs[OBJECT_COUNT];
 
 EntityBase RSDK::objectEntityList[ENTITY_COUNT];
+#if RETRO_PLATFORM == RETRO_PSP
+uint8 RSDK::pspSlotFlags[ENTITY_COUNT];
+
+// The pause menu (game side, PauseMenu_Draw) sets this every frame to its own draw group. While frozen under it, nothing
+// below that group can change, so those groups are drawn once into pspFreezeFrame and restored from it afterwards,
+// instead of redrawing the whole stage under the menu each frame (100ms+ per frame in the special stages).
+// Other frozen states (deaths, cutscenes) keep animating below and never set it.
+extern "C" {
+int32 pspFreezeDrawGroup = -1;
+}
+static uint16 *pspFreezeFrame;
+static bool32 pspFreezeValid;
+static uint8 pspFreezeOnScreen[ENTITY_COUNT]; // onScreen as of the captured frame: objects read last frame's value
+
+static void PSPReleaseFreezeFrame()
+{
+    if (pspFreezeFrame) {
+        free(pspFreezeFrame);
+        pspFreezeFrame = NULL;
+    }
+    pspFreezeValid = false;
+}
+
+// per-class update/draw time (us), indexed by scene class ID, plus tile layer drawing; reported with "PSP perf"
+static unsigned long long pspClassUpd[OBJECT_COUNT];
+static unsigned long long pspClassDraw[OBJECT_COUNT];
+static unsigned long long pspLayerDraw;
+// rotozoom shape (diagnostics): lines drawn and tiles each line crosses, bucketed
+static uint32 pspRotoLines, pspRotoCrossings, pspRotoBuckets[5]; // <=8, <=16, <=32, <=64, more
+static void PSPRotozoomStats(TileLayer *layer)
+{
+    int32 width = currentScreen->clipBound_X2 - currentScreen->clipBound_X1;
+    for (int32 y = currentScreen->clipBound_Y1; y < currentScreen->clipBound_Y2; ++y) {
+        ScanlineInfo *line = &scanlines[y];
+        int32 x0 = line->position.x >> 20, y0 = line->position.y >> 20;
+        int32 x1 = (line->position.x + line->deform.x * width) >> 20, y1 = (line->position.y + line->deform.y * width) >> 20;
+        uint32 crossings = abs(x1 - x0) + abs(y1 - y0) + 1;
+        pspRotoLines++;
+        pspRotoCrossings += crossings;
+        pspRotoBuckets[crossings <= 8 ? 0 : crossings <= 16 ? 1 : crossings <= 32 ? 2 : crossings <= 64 ? 3 : 4]++;
+    }
+}
+static unsigned long long pspLayerPrep[LAYER_COUNT];
+static unsigned long long pspLayerRaster[LAYER_COUNT];
+static uint32 pspLayerCalls[LAYER_COUNT];
+
+static void PSPPrintTopClasses(const char *label, unsigned long long *times, uint32 frames)
+{
+    char line[0x200];
+    int32 len = sprintf(line, "PSP %s:", label);
+    for (int32 n = 0; n < 5; ++n) {
+        int32 best = -1;
+        for (int32 c = 0; c < sceneInfo.classCount; ++c)
+            if (times[c] && (best < 0 || times[c] > times[best]))
+                best = c;
+        if (best < 0)
+            break;
+
+        const char *name = objectClassList[stageObjectIDs[best]].name;
+        len += sprintf(line + len, " %s=%u", name ? name : "?", (uint32)(times[best] / frames));
+        times[best] = 0;
+    }
+    PrintLog(PRINT_NORMAL, "%s", line);
+}
+
+void PSPReportClassProfile(uint32 frames)
+{
+    if (!frames)
+        frames = 1;
+    PSPPrintTopClasses("upd", pspClassUpd, frames);
+    PSPPrintTopClasses("draw", pspClassDraw, frames);
+    PrintLog(PRINT_NORMAL, "PSP layers=%u", (uint32)(pspLayerDraw / frames));
+    PrintLog(PRINT_NORMAL, "PSP layer profile: scene=%s/%s, prep/raster in us/frame", currentSceneFolder, currentSceneID);
+    for (int32 i = 0; i < LAYER_COUNT; ++i) {
+        if (!pspLayerCalls[i])
+            continue;
+        const char *type = "unknown";
+        switch (tileLayers[i].type) {
+            case LAYER_HSCROLL: type = "HScroll"; break;
+            case LAYER_VSCROLL: type = "VScroll"; break;
+            case LAYER_ROTOZOOM: type = "Rotozoom"; break;
+            case LAYER_BASIC: type = "Basic"; break;
+        }
+        PrintLog(PRINT_NORMAL, "PSP layer[%d] %s: prep=%u raster=%u calls=%u", i, type,
+                 (uint32)(pspLayerPrep[i] / frames), (uint32)(pspLayerRaster[i] / frames), pspLayerCalls[i]);
+    }
+    PSPReportTileDrawProfile();
+    if (pspFacesDrawn || pspFacesCulled)
+        PrintLog(PRINT_NORMAL, "PSP 3d faces/frame: drawn=%u culled=%u | us/frame add=%u sort=%u draw=%u | shaded px/frame=%u",
+                 pspFacesDrawn / frames, pspFacesCulled / frames, (uint32)(pspS3DTime[0] / frames), (uint32)(pspS3DTime[1] / frames),
+                 (uint32)(pspS3DTime[2] / frames), pspS3DPixels / frames);
+    if (pspS3DCalls)
+        PrintLog(PRINT_NORMAL, "PSP 3d records/frame: scenes=%u lit=%u reused=%u verts=%u | us total=%u light=%u queue=%u", pspS3DCalls / frames,
+                 pspS3DModels / frames, pspS3DReused / frames, pspS3DVerts / frames, (uint32)(pspS3DDetail[0] / frames), (uint32)(pspS3DDetail[1] / frames),
+                 (uint32)(pspS3DDetail[2] / frames));
+    pspS3DCalls = pspS3DModels = pspS3DVerts = pspS3DReused = 0;
+    PSPReportLitModels(frames);
+    memset(pspS3DDetail, 0, sizeof(pspS3DDetail));
+    if (pspRotoLines)
+        PrintLog(PRINT_NORMAL, "PSP roto/frame: lines=%u tiles=%u | lines by tiles crossed <=8:%u <=16:%u <=32:%u <=64:%u more:%u", pspRotoLines / frames,
+                 pspRotoCrossings / frames, pspRotoBuckets[0] / frames, pspRotoBuckets[1] / frames, pspRotoBuckets[2] / frames,
+                 pspRotoBuckets[3] / frames, pspRotoBuckets[4] / frames);
+    pspRotoLines = pspRotoCrossings = 0;
+    memset(pspRotoBuckets, 0, sizeof(pspRotoBuckets));
+    {
+        extern unsigned int pspRotoGeRows, pspRotoCpuRows, pspRotoLayerW, pspRotoLayerH;
+        if (pspRotoGeRows || pspRotoCpuRows)
+            PrintLog(PRINT_NORMAL, "PSP roto rows/frame: ge=%u cpu=%u (layer %ux%u tiles)", pspRotoGeRows / frames, pspRotoCpuRows / frames,
+                     pspRotoLayerW, pspRotoLayerH);
+        pspRotoGeRows = pspRotoCpuRows = 0;
+        extern unsigned int pspHorizonRowsSum[3], pspHorizonRowsMax[3], pspHorizonFrames;
+        if (pspHorizonFrames)
+            PrintLog(PRINT_NORMAL, "PSP horizon rows (avg/max): <2px %u/%u <3px %u/%u <4px %u/%u", pspHorizonRowsSum[0] / pspHorizonFrames,
+                     pspHorizonRowsMax[0], pspHorizonRowsSum[1] / pspHorizonFrames, pspHorizonRowsMax[1], pspHorizonRowsSum[2] / pspHorizonFrames,
+                     pspHorizonRowsMax[2]);
+        memset(pspHorizonRowsSum, 0, sizeof(pspHorizonRowsSum));
+        memset(pspHorizonRowsMax, 0, sizeof(pspHorizonRowsMax));
+        pspHorizonFrames = 0;
+    }
+    if (pspGeSpriteCount)
+        PrintLog(PRINT_NORMAL, "PSP sprites on GE/frame: %u (cache: copies=%u resets=%u)", pspGeSpriteCount / frames, pspSpriteCacheCopies,
+                 pspSpriteCacheResets);
+    pspGeSpriteCount = pspSpriteCacheCopies = pspSpriteCacheResets = 0;
+    if (pspGeLayerSprites)
+        PrintLog(PRINT_NORMAL, "PSP layers on GE: sprites/frame=%u (rotozoom: walk=%uus gewait=%uus runs=%u index rows=%u) cluts=%u in %uus",
+                 pspGeLayerSprites / frames, (uint32)(pspGeRotoGenUS / frames), (uint32)(pspGeRotoFlushUS / frames), pspRotoWalkRuns / frames,
+                 pspRotoIndexRows / frames, pspGeClutCount / frames, (uint32)(pspGeClutUS / frames));
+    {
+        extern unsigned long long pspRotoIndexUS, pspRotoBlankUS, pspGenItemUS, pspGenInitUS;
+        PrintLog(PRINT_NORMAL, "PSP roto parts/frame: index rows %uus, blankmap %uus, ge rows %uus (%u rows)", (uint32)(pspRotoIndexUS / frames),
+                 (uint32)(pspRotoBlankUS / frames), (uint32)(pspGenItemUS / frames), (uint32)(pspGenInitUS / frames));
+        pspRotoIndexUS = pspRotoBlankUS = pspGenItemUS = pspGenInitUS = 0;
+        extern unsigned int pspRotoPageRows, pspRotoPageLines, pspRotoPageCopies;
+        if (pspRotoPageRows)
+            PrintLog(PRINT_NORMAL, "PSP roto pages/frame: rows=%u lines=%u tile copies=%u.%02u", pspRotoPageRows / frames, pspRotoPageLines / frames,
+                     pspRotoPageCopies / frames, pspRotoPageCopies * 100 / frames % 100);
+        pspRotoPageRows = pspRotoPageLines = pspRotoPageCopies = 0;
+    }
+    pspRotoIndexRows = 0;
+    PrintLog(PRINT_NORMAL, "PSP ge kicks/frame: idle=%u.%02u busy=%u.%02u", pspGeIdleKicks / frames, pspGeIdleKicks * 100 / frames % 100,
+             pspGeBusySkips / frames, pspGeBusySkips * 100 / frames % 100);
+    pspGeIdleKicks = pspGeBusySkips = 0;
+    {
+        extern unsigned int pspGeStateSeen[8];
+        PrintLog(PRINT_NORMAL, "PSP ge states seen: %u %u %u %u %u", pspGeStateSeen[0], pspGeStateSeen[1], pspGeStateSeen[2], pspGeStateSeen[3],
+                 pspGeStateSeen[4]);
+        memset(pspGeStateSeen, 0, sizeof(pspGeStateSeen));
+    }
+    {
+        extern unsigned int pspSpriteBankRefusals;
+        PrintLog(PRINT_NORMAL, "PSP sprites refused for mixed palette banks: %u", pspSpriteBankRefusals);
+        pspSpriteBankRefusals = 0;
+    }
+    pspRotoWalkRuns = pspGeClutCount = 0;
+    pspGeClutUS       = 0;
+    pspGeLayerSprites = 0;
+    {
+        extern uint32 pspVScrollBands;
+        extern unsigned long long pspDeformWaitUS, pspDeformLoopUS;
+        if (pspDeformWaitUS || pspDeformLoopUS)
+            PrintLog(PRINT_NORMAL, "PSP deformed sprites in software: GE wait=%uus draw=%uus per frame", (uint32)(pspDeformWaitUS / frames),
+                     (uint32)(pspDeformLoopUS / frames));
+        pspDeformWaitUS = pspDeformLoopUS = 0;
+        if (pspVScrollBands)
+            PrintLog(PRINT_NORMAL, "PSP vscroll on GE: bands/frame=%u", pspVScrollBands / frames);
+        pspVScrollBands = 0;
+    }
+    pspGeRotoGenUS = pspGeRotoFlushUS = 0;
+    if (psp3DFlushes)
+        PrintLog(PRINT_NORMAL, "PSP 3d on GE/frame: flushes=%u triangles=%u us=%u (wb=%u build=%u draw=%u copyback=%u) px=%u", psp3DFlushes / frames,
+                 psp3DTriangles / frames, (uint32)(psp3DFlushUS / frames), (uint32)(psp3DFlushParts[0] / frames), (uint32)(psp3DFlushParts[1] / frames),
+                 (uint32)(psp3DFlushParts[2] / frames), (uint32)(psp3DFlushParts[3] / frames), psp3DCopiedPixels / frames);
+    {
+        extern unsigned int psp3DItemTypes[8];
+        if (psp3DFlushes)
+            PrintLog(PRINT_NORMAL, "PSP 3d items/frame x10: faces=%u models=%u layers=%u sprites=%u masks=%u fills=%u", psp3DItemTypes[0] * 10 / frames,
+                     psp3DItemTypes[1] * 10 / frames, psp3DItemTypes[2] * 10 / frames, psp3DItemTypes[3] * 10 / frames,
+                     psp3DItemTypes[4] * 10 / frames, psp3DItemTypes[5] * 10 / frames);
+        memset(psp3DItemTypes, 0, sizeof(psp3DItemTypes));
+    }
+    memset(psp3DFlushParts, 0, sizeof(psp3DFlushParts));
+    psp3DCopiedPixels = 0;
+    psp3DFlushes   = 0;
+    psp3DTriangles = 0;
+    psp3DFlushUS   = 0;
+    pspFacesDrawn  = 0;
+    pspFacesCulled = 0;
+    pspS3DPixels   = 0;
+    memset(pspS3DTime, 0, sizeof(pspS3DTime));
+    memset(pspClassUpd, 0, sizeof(pspClassUpd));
+    memset(pspClassDraw, 0, sizeof(pspClassDraw));
+    memset(pspLayerPrep, 0, sizeof(pspLayerPrep));
+    memset(pspLayerRaster, 0, sizeof(pspLayerRaster));
+    memset(pspLayerCalls, 0, sizeof(pspLayerCalls));
+    pspLayerDraw = 0;
+}
+#endif
 
 EditableVarInfo *RSDK::editableVarList;
 int32 RSDK::editableVarCount = 0;
@@ -65,6 +262,10 @@ void RSDK::RegisterObject(Object **staticVars, const char *name, uint32 entityCl
 #endif
 #endif
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    if (objectClassCount % 100 == 0)
+        PrintLog(PRINT_NORMAL, "PSPINIT: RegisterObject #%d %s", objectClassCount, name);
+#endif
     if (objectClassCount < OBJECT_COUNT) {
         if (entityClassSize > sizeof(EntityBase))
             PrintLog(PRINT_NORMAL, "Class exceeds max entity memory: %s", name);
@@ -112,6 +313,9 @@ void RSDK::RegisterStaticVariables(void **staticVars, const char *name, uint32 c
 
 void RSDK::LoadStaticVariables(uint8 *classPtr, uint32 *hash, int32 readOffset)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    PSPLoadTimer loadTimer(PSPLOAD_STATIC);
+#endif
     char fullFilePath[0x40];
 
     const char *hexChars = "0123456789ABCDEF";
@@ -312,14 +516,30 @@ void RSDK::InitObjects()
     sceneInfo.createSlot = ENTITY_COUNT - 0x100;
     cameraCount          = 0;
 
+#if RETRO_PLATFORM == RETRO_PSP
+    // load profile: each class's StageLoad (with the sheets/sounds it loads), then the entities' Create, in us
+    static unsigned long long classLoad[OBJECT_COUNT];
+    memset(classLoad, 0, sizeof(classLoad));
+#endif
     for (int32 o = 0; o < sceneInfo.classCount; ++o) {
 #if RETRO_USE_MOD_LOADER
         currentObjectID = o;
 #endif
 
+#if RETRO_PLATFORM == RETRO_PSP
+        unsigned long long start = PSPProfNow();
+#endif
         if (objectClassList[stageObjectIDs[o]].stageLoad)
             objectClassList[stageObjectIDs[o]].stageLoad();
+#if RETRO_PLATFORM == RETRO_PSP
+        classLoad[o] = PSPProfNow() - start;
+#endif
     }
+#if RETRO_PLATFORM == RETRO_PSP
+    PSPPrintTopClasses("stageload us", classLoad, 1);
+    unsigned long long createStart = PSPProfNow();
+    memset(classLoad, 0, sizeof(classLoad));
+#endif
 
 #if RETRO_USE_MOD_LOADER
     RunModCallbacks(MODCB_ONSTAGELOAD, NULL);
@@ -332,10 +552,21 @@ void RSDK::InitObjects()
         if (sceneInfo.entity->classID) {
             if (objectClassList[stageObjectIDs[sceneInfo.entity->classID]].create) {
                 sceneInfo.entity->interaction = true;
+#if RETRO_PLATFORM == RETRO_PSP
+                unsigned long long start = PSPProfNow();
+                int32 classID            = sceneInfo.entity->classID;
+#endif
                 objectClassList[stageObjectIDs[sceneInfo.entity->classID]].create(NULL);
+#if RETRO_PLATFORM == RETRO_PSP
+                classLoad[classID] += PSPProfNow() - start;
+#endif
             }
         }
     }
+#if RETRO_PLATFORM == RETRO_PSP
+    PrintLog(PRINT_NORMAL, "PSP create: %uus total", (uint32)(PSPProfNow() - createStart));
+    PSPPrintTopClasses("create us", classLoad, 1);
+#endif
 
     sceneInfo.state = ENGINESTATE_REGULAR;
 
@@ -447,16 +678,35 @@ void RSDK::ProcessObjects()
                     break;
             }
 
+#if RETRO_PLATFORM == RETRO_PSP
+            // candidate for the typeGroups/lateUpdate passes below (they re-check inRange, as the originals do)
+            pspSlotFlags[e] = (pspSlotFlags[e] & PSP_SLOT_ONSCREEN) | (sceneInfo.entity->inRange ? PSP_SLOT_INRANGE : 0);
+#endif
             if (sceneInfo.entity->inRange) {
-                if (objectClassList[stageObjectIDs[sceneInfo.entity->classID]].update)
+                if (objectClassList[stageObjectIDs[sceneInfo.entity->classID]].update) {
+#if RETRO_PLATFORM == RETRO_PSP
+                    uint16 profClass              = sceneInfo.entity->classID;
+                    unsigned long long profStart  = PSPProfFine();
                     objectClassList[stageObjectIDs[sceneInfo.entity->classID]].update();
+                    pspClassUpd[profClass]       += PSPProfFine() - profStart;
+#else
+                    objectClassList[stageObjectIDs[sceneInfo.entity->classID]].update();
+#endif
+                }
 
                 if (sceneInfo.entity->drawGroup < DRAWGROUP_COUNT)
                     drawGroups[sceneInfo.entity->drawGroup].entries[drawGroups[sceneInfo.entity->drawGroup].entityCount++] = sceneInfo.entitySlot;
             }
         }
         else {
+#if RETRO_PLATFORM == RETRO_PSP
+            // avoid dirtying (and later writing back) the cache line of every empty slot
+            if (sceneInfo.entity->inRange)
+                sceneInfo.entity->inRange = false;
+            pspSlotFlags[e] &= PSP_SLOT_ONSCREEN;
+#else
             sceneInfo.entity->inRange = false;
+#endif
         }
 
         sceneInfo.entitySlot++;
@@ -468,6 +718,43 @@ void RSDK::ProcessObjects()
 
     for (int32 i = 0; i < TYPEGROUP_COUNT; ++i) typeGroups[i].entryCount = 0;
 
+#if RETRO_PLATFORM == RETRO_PSP
+    // Same order and conditions as below, but only entities flagged by the first pass (or copied in-range since)
+    // are touched; everything else is known to be out of range.
+    for (int32 e = 0; e < ENTITY_COUNT; ++e) {
+        if (!(pspSlotFlags[e] & PSP_SLOT_INRANGE))
+            continue;
+
+        sceneInfo.entity = &objectEntityList[e];
+        if (sceneInfo.entity->inRange && sceneInfo.entity->interaction) {
+            typeGroups[GROUP_ALL].entries[typeGroups[GROUP_ALL].entryCount++] = e; // All active objects
+
+            typeGroups[sceneInfo.entity->classID].entries[typeGroups[sceneInfo.entity->classID].entryCount++] = e; // class-based groups
+
+            if (sceneInfo.entity->group >= TYPE_COUNT)
+                typeGroups[sceneInfo.entity->group].entries[typeGroups[sceneInfo.entity->group].entryCount++] = e; // extra groups
+        }
+    }
+
+    // flags are re-read per slot so entities copied in-range by an earlier lateUpdate are still visited
+    for (int32 e = 0; e < ENTITY_COUNT; ++e) {
+        uint8 flags = pspSlotFlags[e];
+        if (!flags)
+            continue;
+
+        sceneInfo.entity     = &objectEntityList[e];
+        sceneInfo.entitySlot = e;
+        if ((flags & PSP_SLOT_INRANGE) && sceneInfo.entity->inRange) {
+            if (objectClassList[stageObjectIDs[sceneInfo.entity->classID]].lateUpdate)
+                objectClassList[stageObjectIDs[sceneInfo.entity->classID]].lateUpdate();
+        }
+
+        sceneInfo.entity->onScreen = 0;
+        pspSlotFlags[e] &= PSP_SLOT_INRANGE;
+    }
+    sceneInfo.entity     = &objectEntityList[ENTITY_COUNT - 1];
+    sceneInfo.entitySlot = ENTITY_COUNT;
+#else
     sceneInfo.entitySlot = 0;
     for (int32 e = 0; e < ENTITY_COUNT; ++e) {
         sceneInfo.entity = &objectEntityList[e];
@@ -496,6 +783,7 @@ void RSDK::ProcessObjects()
         sceneInfo.entity->onScreen = 0;
         sceneInfo.entitySlot++;
     }
+#endif
 
 #if RETRO_USE_MOD_LOADER
     RunModCallbacks(MODCB_ONLATEUPDATE, INT_TO_VOID(ENGINESTATE_REGULAR));
@@ -721,6 +1009,16 @@ void RSDK::ProcessFrozenObjects()
 }
 void RSDK::ProcessObjectDrawLists()
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    // the previous frame's display list samples the framebuffers we are about to draw over
+    PSPWaitDisplayList();
+
+    int32 freezeGroup  = pspFreezeDrawGroup;
+    pspFreezeDrawGroup = -1; // the menu renews it for as long as it is drawn
+    bool32 freezing    = sceneInfo.state == ENGINESTATE_FROZEN && videoSettings.screenCount == 1 && freezeGroup > 0 && freezeGroup < DRAWGROUP_COUNT;
+    if (!freezing)
+        PSPReleaseFreezeFrame();
+#endif
     if (sceneInfo.state != ENGINESTATE_LOAD && sceneInfo.state != (ENGINESTATE_LOAD | ENGINESTATE_STEPOVER)) {
         for (int32 s = 0; s < videoSettings.screenCount; ++s) {
             currentScreen             = &screens[s];
@@ -737,6 +1035,25 @@ void RSDK::ProcessObjectDrawLists()
 
             sceneInfo.currentDrawGroup = 0;
             for (int32 l = 0; l < DRAWGROUP_COUNT; ++l) {
+#if RETRO_PLATFORM == RETRO_PSP
+                bool32 reuseFrame = freezing && pspFreezeValid && l < freezeGroup;
+                if (freezing && l == freezeGroup) {
+                    PSP_FLUSH_3D();
+                    size_t frameSize = currentScreen->pitch * currentScreen->size.y * sizeof(uint16);
+                    if (pspFreezeValid) {
+                        memcpy(currentScreen->frameBuffer, pspFreezeFrame, frameSize);
+                    }
+                    else {
+                        // first frozen frame: everything below was just drawn normally, keep it
+                        if (!pspFreezeFrame)
+                            pspFreezeFrame = (uint16 *)malloc(frameSize);
+                        if (pspFreezeFrame) {
+                            memcpy(pspFreezeFrame, currentScreen->frameBuffer, frameSize);
+                            pspFreezeValid = true;
+                        }
+                    }
+                }
+#endif
                 if (engine.drawGroupVisible[l]) {
                     DrawList *list = &drawGroups[l];
 
@@ -757,12 +1074,33 @@ void RSDK::ProcessObjectDrawLists()
                     }
 
                     for (int32 i = 0; i < list->entityCount; ++i) {
+#if RETRO_PLATFORM == RETRO_PSP
+                        if (reuseFrame) {
+                            EntityBase *entity = &objectEntityList[list->entries[i]];
+                            if (entity->visible) {
+                                entity->onScreen = pspFreezeOnScreen[list->entries[i]];
+                                if (entity->onScreen)
+                                    pspSlotFlags[list->entries[i]] |= PSP_SLOT_ONSCREEN;
+                            }
+                            continue;
+                        }
+#endif
                         sceneInfo.entitySlot = list->entries[i];
                         validDraw            = false;
                         sceneInfo.entity     = &objectEntityList[list->entries[i]];
                         if (sceneInfo.entity->visible) {
+#if RETRO_PLATFORM == RETRO_PSP
+                            if (objectClassList[stageObjectIDs[sceneInfo.entity->classID]].draw) {
+                                uint16 profClass             = sceneInfo.entity->classID;
+                                unsigned long long profStart = PSPProfFine();
+                                objectClassList[stageObjectIDs[sceneInfo.entity->classID]].draw();
+                                pspClassDraw[profClass] += PSPProfFine() - profStart;
+                                PSPKick3DIfIdle();
+                            }
+#else
                             if (objectClassList[stageObjectIDs[sceneInfo.entity->classID]].draw)
                                 objectClassList[stageObjectIDs[sceneInfo.entity->classID]].draw();
+#endif
 
 #if RETRO_VER_EGS || RETRO_USE_DUMMY_ACHIEVEMENTS
                             if (i == list->entityCount - 1)
@@ -770,20 +1108,55 @@ void RSDK::ProcessObjectDrawLists()
 #endif
 
                             sceneInfo.entity->onScreen |= validDraw << sceneInfo.currentScreenID;
+#if RETRO_PLATFORM == RETRO_PSP
+                            if (sceneInfo.entity->onScreen)
+                                pspSlotFlags[list->entries[i]] |= PSP_SLOT_ONSCREEN;
+                            if (freezing && l < freezeGroup)
+                                pspFreezeOnScreen[list->entries[i]] = sceneInfo.entity->onScreen;
+#endif
                         }
                     }
 
-                    for (int32 i = 0; i < list->layerCount; ++i) {
+#if RETRO_PLATFORM == RETRO_PSP
+                    int32 layerCount = reuseFrame ? 0 : list->layerCount;
+#else
+                    int32 layerCount = list->layerCount;
+#endif
+                    for (int32 i = 0; i < layerCount; ++i) {
                         TileLayer *layer = &tileLayers[list->layerDrawList[i]];
 
 #if RETRO_USE_MOD_LOADER
                         RunModCallbacks(MODCB_ONSCANLINECB, (void *)layer->scanlineCallback);
+#endif
+#if RETRO_PLATFORM == RETRO_PSP
+                        unsigned long long layerStart = PSPProfFine();
 #endif
                         if (layer->scanlineCallback)
                             layer->scanlineCallback(scanlines);
                         else
                             ProcessParallax(layer);
 
+#if RETRO_PLATFORM == RETRO_PSP
+                        unsigned long long rasterStart = PSPProfFine();
+                        bool32 onGE = false;
+                        switch (layer->type) {
+                            case LAYER_HSCROLL: onGE = PSPQueueLayerHScroll(layer); break;
+                            case LAYER_VSCROLL: onGE = PSPQueueLayerVScroll(layer); break;
+                            case LAYER_ROTOZOOM: onGE = PSPQueueLayerRotozoom(layer); break;
+                            case LAYER_BASIC: onGE = PSPQueueLayerBasic(layer); break;
+                            default: break;
+                        }
+                        if (!onGE) {
+                            PSP_FLUSH_3D();
+                            switch (layer->type) {
+                                case LAYER_HSCROLL: DrawLayerHScroll(layer); break;
+                                case LAYER_VSCROLL: DrawLayerVScroll(layer); break;
+                                case LAYER_ROTOZOOM: DrawLayerRotozoom(layer); break;
+                                case LAYER_BASIC: DrawLayerBasic(layer); break;
+                                default: break;
+                            }
+                        }
+#else
                         switch (layer->type) {
                             case LAYER_HSCROLL: DrawLayerHScroll(layer); break;
                             case LAYER_VSCROLL: DrawLayerVScroll(layer); break;
@@ -791,6 +1164,15 @@ void RSDK::ProcessObjectDrawLists()
                             case LAYER_BASIC: DrawLayerBasic(layer); break;
                             default: break;
                         }
+#endif
+#if RETRO_PLATFORM == RETRO_PSP
+                        unsigned long long layerEnd = PSPProfFine();
+                        int32 layerID = list->layerDrawList[i];
+                        pspLayerDraw += layerEnd - layerStart;
+                        pspLayerPrep[layerID] += rasterStart - layerStart;
+                        pspLayerRaster[layerID] += layerEnd - rasterStart;
+                        ++pspLayerCalls[layerID];
+#endif
                     }
 
 #if RETRO_USE_MOD_LOADER

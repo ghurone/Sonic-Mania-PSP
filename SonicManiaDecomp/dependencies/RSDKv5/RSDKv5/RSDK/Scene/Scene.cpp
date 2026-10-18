@@ -6,7 +6,75 @@ using namespace RSDK;
 #include "Legacy/SceneLegacy.cpp"
 #endif
 
+#if RETRO_PLATFORM == RETRO_PSP
+#include "RSDK/Scene/PSP/PSPTileRows.hpp"
+alignas(16) uint8 RSDK::tilesetPixels[TILESET_SIZE * 4]; // aligned: PSPUpdateTileFlags reads it 32 bits at a time
+
+uint16 RSDK::pspTileRowEmpty[TILE_COUNT * 4];
+uint16 RSDK::pspTileRowOpaque[TILE_COUNT * 4];
+uint16 RSDK::pspTileRowSolid[TILE_COUNT * 4];
+
+#if PSP_TILE_BENCH
+#include "RSDK/Scene/PSP/PSPHScrollReference.inl"
+#include "RSDK/Scene/PSP/PSPHScrollTextured.inl"
+#include "RSDK/Scene/PSP/PSPHScrollHybrid.inl"
+struct PSPTileBenchState {
+    uint32 calls, pairs;
+    uint64 referenceUS, optimizedUS;
+};
+static PSPTileBenchState pspTileBench[LAYER_COUNT];
+static uint32 pspHScrollOptimizedMask;
+static uint32 pspHScrollTexturedMask;
+static uint32 pspHScrollHybridMask;
+static void PSPDrawLayerHScrollSolid(TileLayer *layer);
+static void PSPBenchmarkHScroll(TileLayer *layer);
+static void PSPDrawSelectedHScroll(TileLayer *layer, int32 id)
+{
+    if (pspHScrollHybridMask & (1U << id))
+        PSPDrawLayerHScrollHybrid(layer);
+    else if (pspHScrollTexturedMask & (1U << id))
+        PSPDrawLayerHScrollTextured(layer);
+    else if (pspHScrollOptimizedMask & (1U << id))
+        PSPDrawLayerHScrollSolid(layer);
+    else
+        PSPDrawLayerHScrollReference(layer);
+}
+#endif
+
+#include "RSDK/Scene/PSP/PSPBasicRows.inl"
+#include "RSDK/Scene/PSP/PSPRotozoomGroups.inl"
+#include "RSDK/Scene/PSP/PSPRotoWalk.hpp"
+#include "RSDK/Scene/PSP/PSPRotozoomRuns.inl"
+#include "RSDK/Scene/PSP/PSPTitleCompare.inl"
+
+void RSDK::PSPReportTileDrawProfile()
+{
+    PSPReportTitleModes();
+    PrintLog(PRINT_NORMAL, "PSP tiles v9: color_cache=0 solid_flags_bytes=%u hscroll_opt=%d bench=%d",
+             (uint32)sizeof(pspTileRowSolid), PSP_HSCROLL_OPT, PSP_TILE_BENCH);
+#if PSP_TILE_BENCH
+    PrintLog(PRINT_NORMAL, "PSP tilebench modes v9: solid_mask=%u textured_mask=%u hybrid_mask=%u", pspHScrollOptimizedMask, pspHScrollTexturedMask, pspHScrollHybridMask);
+#endif
+}
+
+void RSDK::PSPUpdateTileFlags(int32 tile, int32 count)
+{
+    PSPUpdateTileAtlas(tile, count);
+    if (tile < 0)
+        tile = 0;
+    if (tile + count > TILE_COUNT)
+        count = TILE_COUNT - tile;
+
+    for (int32 v = 0; v < 4; ++v) {
+        for (int32 t = tile; t < tile + count; ++t) {
+            int32 slot       = v * TILE_COUNT + t;
+            PSPClassifyTileRows(&tilesetPixels[slot * TILE_DATASIZE], pspTileRowEmpty[slot], pspTileRowOpaque[slot], pspTileRowSolid[slot]);
+        }
+    }
+}
+#else
 uint8 RSDK::tilesetPixels[TILESET_SIZE * 4];
+#endif
 
 ScanlineInfo *RSDK::scanlines = NULL;
 TileLayer RSDK::tileLayers[LAYER_COUNT];
@@ -23,6 +91,13 @@ SceneInfo RSDK::sceneInfo;
 
 void RSDK::LoadSceneFolder()
 {
+#if RETRO_PLATFORM == RETRO_PSP && PSP_TILE_BENCH
+    memset(pspTileBench, 0, sizeof(pspTileBench));
+    pspHScrollOptimizedMask = 0;
+    pspHScrollTexturedMask = 0;
+    pspHScrollHybridMask = 0;
+    PSPResetTitleBench();
+#endif
 #if RETRO_PLATFORM == RETRO_ANDROID
     ShowLoadingIcon();
 #endif
@@ -454,10 +529,29 @@ void RSDK::LoadSceneAssets()
         uint8 objectCount = ReadInt8(&info);
         editableVarList   = NULL;
         AllocateStorage((void **)&editableVarList, sizeof(EditableVarInfo) * EDITABLEVAR_COUNT, DATASET_TMP, false);
+        if (!editableVarList) {
+            CloseFile(&info);
+            return;
+        }
 
 #if RETRO_REV02
+#if RETRO_PLATFORM == RETRO_PSP
+        // Entities in slots past SCENEENTITY_COUNT wait here until the free slots are known. Only 4 of the game's scenes
+        // have any (SPZ1 Act 1 the most: slots up to 0x800 + 323), so room for 512 of them, not 2048 (2.2MB of a 2MB
+        // TMP pool on PSP); any past that are dropped (and logged) rather than written past the buffer.
+        const int32 tempEntityCount = 0x200;
+        EntityBase pspSkippedEntity;
+#else
+        const int32 tempEntityCount = SCENEENTITY_COUNT;
+#endif
         EntityBase *tempEntityList = NULL;
-        AllocateStorage((void **)&tempEntityList, SCENEENTITY_COUNT * sizeof(EntityBase), DATASET_TMP, true);
+        AllocateStorage((void **)&tempEntityList, tempEntityCount * sizeof(EntityBase), DATASET_TMP, true);
+        if (!tempEntityList) {
+            RemoveStorageEntry((void **)&editableVarList);
+            editableVarList = NULL;
+            CloseFile(&info);
+            return;
+        }
 #endif
 
         for (int32 i = 0; i < objectCount; ++i) {
@@ -477,7 +571,7 @@ void RSDK::LoadSceneAssets()
 
 #if !RETRO_USE_ORIGINAL_CODE
             if (!classID && i >= TYPE_DEFAULT_COUNT)
-                PrintLog(PRINT_NORMAL, "Object Class %d is unimplemented!", i);
+                PrintLog(PRINT_NORMAL, "Object Class %d is unimplemented! Hash: %08X%08X%08X%08X", i, objHash[0], objHash[1], objHash[2], objHash[3]);
 #endif
 
             ObjectClass *objectClass = &objectClassList[stageObjectIDs[classID]];
@@ -530,6 +624,12 @@ void RSDK::LoadSceneAssets()
 #if RETRO_REV02
                 if (slotID < SCENEENTITY_COUNT)
                     entity = &objectEntityList[slotID + RESERVE_ENTITY_COUNT];
+#if RETRO_PLATFORM == RETRO_PSP
+                else if (slotID - SCENEENTITY_COUNT >= tempEntityCount) {
+                    PrintLog(PRINT_NORMAL, "PSP: scene entity slot %d dropped (past the temporary list)", slotID);
+                    entity = &pspSkippedEntity;
+                }
+#endif
                 else
                     entity = &tempEntityList[slotID - SCENEENTITY_COUNT];
 #else
@@ -691,7 +791,7 @@ void RSDK::LoadSceneAssets()
             entity++;
         }
 
-        for (int32 i = 0; i < SCENEENTITY_COUNT; ++i) {
+        for (int32 i = 0; i < tempEntityCount; ++i) {
             if (sceneInfo.filter & tempEntityList[i].filter)
                 memcpy(&objectEntityList[activeSlot++], &tempEntityList[i], sizeof(EntityBase));
 
@@ -1011,6 +1111,11 @@ void RSDK::LoadStageGIF(char *filepath)
             dstPixels += (TILE_SIZE * 2);
         }
 
+#if RETRO_PLATFORM == RETRO_PSP
+        PSPRotoFreeMaps();
+        PSPUpdateTileFlags(0, TILE_COUNT);
+#endif
+
 #if RETRO_USE_ORIGINAL_CODE
         tileset.palette = NULL;
         tileset.decoder = NULL;
@@ -1291,34 +1396,49 @@ void RSDK::CopyTileLayer(uint16 dstLayerID, int32 dstStartX, int32 dstStartY, ui
     }
 }
 
+#if RETRO_PLATFORM == RETRO_PSP
+static void PSPDrawLayerHScrollSolid(TileLayer *layer)
+#else
 void RSDK::DrawLayerHScroll(TileLayer *layer)
+#endif
 {
     if (!layer->xsize || !layer->ysize)
         return;
 
-    int32 lineTileCount    = (currentScreen->pitch >> 4) - 1;
-    uint8 *lineBuffer      = &gfxLineBuffer[currentScreen->clipBound_Y1];
-    ScanlineInfo *scanline = &scanlines[currentScreen->clipBound_Y1];
-    uint16 *frameBuffer    = &currentScreen->frameBuffer[currentScreen->pitch * currentScreen->clipBound_Y1];
+    // Framebuffer writes cannot alter the screen/layer configuration. Keep
+    // these invariants local instead of reloading them in the tile loop.
+    const int32 pitch       = currentScreen->pitch;
+    const int32 clipTop     = currentScreen->clipBound_Y1;
+    const int32 clipBottom  = currentScreen->clipBound_Y2;
+    const int32 layerWidth  = layer->xsize;
+    const int32 widthShift  = layer->widthShift;
+    const uint16 *layoutBase = layer->layout;
+    int32 lineTileCount     = (pitch >> 4) - 1;
+    uint8 *lineBuffer       = &gfxLineBuffer[clipTop];
+    ScanlineInfo *scanline  = &scanlines[clipTop];
+    uint16 *frameBuffer = &currentScreen->frameBuffer[pitch * clipTop];
 
-    for (int32 cy = currentScreen->clipBound_Y1; cy < currentScreen->clipBound_Y2; ++cy) {
+    for (int32 cy = clipTop; cy < clipBottom; ++cy) {
         int32 x               = scanline->position.x;
         int32 y               = scanline->position.y;
         int32 tileX           = FROM_FIXED(x);
-        uint16 *activePalette = fullPalette[*lineBuffer++];
+        const uint16 *activePalette = fullPalette[*lineBuffer++];
 
-        if (tileX >= TILE_SIZE * layer->xsize)
-            x = TO_FIXED(tileX - TILE_SIZE * layer->xsize);
+        if (tileX >= TILE_SIZE * layerWidth)
+            x = TO_FIXED(tileX - TILE_SIZE * layerWidth);
         else if (tileX < 0)
-            x = TO_FIXED(tileX + TILE_SIZE * layer->xsize);
+            x = TO_FIXED(tileX + TILE_SIZE * layerWidth);
 
         int32 tileRemain = TILE_SIZE - (FROM_FIXED(x) & 0xF);
         int32 sheetX     = FROM_FIXED(x) & 0xF;
         int32 sheetY     = TILE_SIZE * (FROM_FIXED(y) & 0xF);
-        int32 lineRemain = currentScreen->pitch;
+#if RETRO_PLATFORM == RETRO_PSP
+        uint16 rowBit    = 1 << (sheetY >> 4); // this scanline's row within every tile
+#endif
+        int32 lineRemain = pitch;
 
         int32 tx       = x >> 20;
-        uint16 *layout = &layer->layout[tx + ((y >> 20) << layer->widthShift)];
+        const uint16 *layout = &layoutBase[tx + ((y >> 20) << widthShift)];
         lineRemain -= tileRemain;
 
         if (*layout >= 0xFFFF) {
@@ -1337,14 +1457,46 @@ void RSDK::DrawLayerHScroll(TileLayer *layer)
         for (int32 l = 0; l < lineTileCount; ++l) {
             ++layout;
 
-            if (++tx == layer->xsize) {
+            if (++tx == layerWidth) {
                 tx = 0;
-                layout -= layer->xsize;
+                layout -= layerWidth;
             }
 
             if (*layout < 0xFFFF) {
                 uint8 *pixels = &tilesetPixels[TILE_DATASIZE * (*layout & 0xFFF) + sheetY];
 
+#if RETRO_PLATFORM == RETRO_PSP
+                uint16 slot = *layout & 0xFFF;
+                if (pspTileRowOpaque[slot] & rowBit) { // no transparent pixel in this row: no per-pixel test
+#if PSP_HSCROLL_OPT
+                    if (pspTileRowSolid[slot] & rowBit)
+                        PSPFillSolidTileRow(frameBuffer, activePalette[pixels[0]]);
+                    else
+                        PSPDrawOpaqueTileRow(frameBuffer, pixels, activePalette);
+#else
+                    frameBuffer[0] = activePalette[pixels[0]];
+                    frameBuffer[1] = activePalette[pixels[1]];
+                    frameBuffer[2] = activePalette[pixels[2]];
+                    frameBuffer[3] = activePalette[pixels[3]];
+                    frameBuffer[4] = activePalette[pixels[4]];
+                    frameBuffer[5] = activePalette[pixels[5]];
+                    frameBuffer[6] = activePalette[pixels[6]];
+                    frameBuffer[7] = activePalette[pixels[7]];
+                    frameBuffer[8] = activePalette[pixels[8]];
+                    frameBuffer[9] = activePalette[pixels[9]];
+                    frameBuffer[10] = activePalette[pixels[10]];
+                    frameBuffer[11] = activePalette[pixels[11]];
+                    frameBuffer[12] = activePalette[pixels[12]];
+                    frameBuffer[13] = activePalette[pixels[13]];
+                    frameBuffer[14] = activePalette[pixels[14]];
+                    frameBuffer[15] = activePalette[pixels[15]];
+#endif
+                }
+                else if (!(pspTileRowEmpty[slot] & rowBit)) { // fully transparent rows draw nothing
+#endif
+#if PSP_HSCROLL_OPT
+                PSPDrawMixedTileRow(frameBuffer, pixels, activePalette); // skips a transparent half with two word loads
+#else
                 uint8 index = *pixels;
                 if (index)
                     *frameBuffer = activePalette[index];
@@ -1408,6 +1560,10 @@ void RSDK::DrawLayerHScroll(TileLayer *layer)
                 index = pixels[15];
                 if (index)
                     frameBuffer[15] = activePalette[index];
+#endif
+#if RETRO_PLATFORM == RETRO_PSP
+                }
+#endif
             }
 
             frameBuffer += TILE_SIZE;
@@ -1417,9 +1573,9 @@ void RSDK::DrawLayerHScroll(TileLayer *layer)
         while (lineRemain > 0) {
             ++layout;
 
-            if (++tx == layer->xsize) {
+            if (++tx == layerWidth) {
                 tx = 0;
-                layout -= layer->xsize;
+                layout -= layerWidth;
             }
 
             tileRemain = lineRemain >= TILE_SIZE ? TILE_SIZE : lineRemain;
@@ -1443,6 +1599,135 @@ void RSDK::DrawLayerHScroll(TileLayer *layer)
         ++scanline;
     }
 }
+
+#if RETRO_PLATFORM == RETRO_PSP
+void RSDK::DrawLayerHScroll(TileLayer *layer)
+{
+    if (!layer->xsize || !layer->ysize)
+        return;
+#if PSP_TILE_BENCH
+    int32 id = (int32)(layer - tileLayers);
+    if (id >= 0 && id < LAYER_COUNT) {
+        PSPDrawSelectedHScroll(layer, id);
+        PSPBenchmarkHScroll(layer);
+        return;
+    }
+#endif
+    PSPDrawLayerHScrollSolid(layer);
+}
+#endif
+
+#if RETRO_PLATFORM == RETRO_PSP && PSP_TILE_BENCH
+static void PSPBenchmarkHScroll(TileLayer *layer)
+{
+    int32 id = (int32)(layer - tileLayers);
+    if (id < 0 || id >= LAYER_COUNT)
+        return;
+    PSPTileBenchState &s = pspTileBench[id];
+    if (s.pairs >= 12)
+        return;
+    ++s.calls;
+    // First retain the reference/v7 solid winner, then compare the textured
+    // candidate against that winner. Four pairs per phase, spaced across frames.
+    // Repeating HScroll is idempotent: only nonzero pixels are overwritten,
+    // with the same scanlines, palette and tiles, and no callbacks or updates.
+    if (s.calls < 120 || (s.calls & 63) != (uint32)(id * 8))
+        return;
+    if (s.pairs == 4) {
+        // One untimed description of the real rows reaching the full-tile path.
+        // Counters stay out of normal drawing and the measured candidate calls.
+        uint32 blank = 0, empty = 0, solid = 0, opaque = 0, mixed = 0, halfEmpty = 0;
+        int32 fullTiles = (currentScreen->pitch >> 4) - 1;
+        for (int32 cy = currentScreen->clipBound_Y1; cy < currentScreen->clipBound_Y2; ++cy) {
+            int32 x = FROM_FIXED(scanlines[cy].position.x);
+            int32 y = scanlines[cy].position.y;
+            if (x >= TILE_SIZE * layer->xsize)
+                x -= TILE_SIZE * layer->xsize;
+            else if (x < 0)
+                x += TILE_SIZE * layer->xsize;
+            int32 tx = x >> 4;
+            const uint16 *row = &layer->layout[(y >> 20) << layer->widthShift];
+            uint16 bit = 1 << (FROM_FIXED(y) & 15);
+            for (int32 tile = 0; tile < fullTiles; ++tile) {
+                if (++tx == layer->xsize)
+                    tx = 0;
+                uint16 slot = row[tx];
+                if (slot == 0xFFFF) {
+                    ++blank;
+                    continue;
+                }
+                slot &= 0xFFF;
+                if (pspTileRowEmpty[slot] & bit)
+                    ++empty;
+                else if (pspTileRowOpaque[slot] & bit) {
+                    if (pspTileRowSolid[slot] & bit)
+                        ++solid;
+                    else
+                        ++opaque;
+                }
+                else {
+                    ++mixed;
+                    const uint32 *words = (const uint32 *)&tilesetPixels[slot * TILE_DATASIZE + TILE_SIZE * (FROM_FIXED(y) & 15)];
+                    if (!(words[0] | words[1]) || !(words[2] | words[3]))
+                        ++halfEmpty;
+                }
+            }
+        }
+        PrintLog(PRINT_NORMAL, "PSP rowmix v9: scene=%s/%s layer=%d blank=%u empty=%u solid=%u opaque=%u mixed=%u half_empty=%u",
+                 currentSceneFolder, currentSceneID, id, blank, empty, solid, opaque, mixed, halfEmpty);
+    }
+    bool hybridPhase = s.pairs >= 8;
+    bool texturedPhase = s.pairs >= 4 && !hybridPhase;
+    const char *baseline = (pspHScrollTexturedMask & (1U << id)) ? "textured"
+                           : (pspHScrollOptimizedMask & (1U << id)) ? "solid" : "reference";
+    for (int32 pass = 0; pass < 2; ++pass) {
+        bool reference = ((s.pairs + pass) & 1) == 0;
+        // Warm each function before timing to reduce instruction-cache bias.
+        if (reference)
+            PSPDrawSelectedHScroll(layer, id);
+        else if (hybridPhase)
+            PSPDrawLayerHScrollHybrid(layer);
+        else if (texturedPhase)
+            PSPDrawLayerHScrollTextured(layer);
+        else
+            PSPDrawLayerHScrollSolid(layer);
+        uint64 start = PSPProfNow();
+        if (reference)
+            PSPDrawSelectedHScroll(layer, id);
+        else if (hybridPhase)
+            PSPDrawLayerHScrollHybrid(layer);
+        else if (texturedPhase)
+            PSPDrawLayerHScrollTextured(layer);
+        else
+            PSPDrawLayerHScrollSolid(layer);
+        uint64 elapsed = PSPProfNow() - start;
+        if (reference)
+            s.referenceUS += elapsed;
+        else
+            s.optimizedUS += elapsed;
+    }
+    ++s.pairs;
+    if (s.pairs == 4 || s.pairs == 8 || s.pairs == 12) {
+        bool faster = s.referenceUS && s.optimizedUS * 100 <= s.referenceUS * 95;
+        if (faster) {
+            if (hybridPhase)
+                pspHScrollHybridMask |= 1U << id;
+            else if (texturedPhase)
+                pspHScrollTexturedMask |= 1U << id;
+            else
+                pspHScrollOptimizedMask |= 1U << id;
+        }
+        const char *selected = (pspHScrollHybridMask & (1U << id)) ? "hybrid"
+                              : (pspHScrollTexturedMask & (1U << id)) ? "textured"
+                              : (pspHScrollOptimizedMask & (1U << id)) ? "solid" : "reference";
+        PrintLog(PRINT_NORMAL, "PSP tilebench v9: scene=%s/%s layer=%d phase=%s pairs=4 baseline=%s baseline_us=%u candidate_us=%u selected=%s",
+                 currentSceneFolder, currentSceneID, id, hybridPhase ? "hybrid" : texturedPhase ? "textured" : "solid", baseline,
+                 (uint32)(s.referenceUS / 4), (uint32)(s.optimizedUS / 4), selected);
+        s.referenceUS = s.optimizedUS = 0;
+    }
+}
+#endif
+
 void RSDK::DrawLayerVScroll(TileLayer *layer)
 {
     if (!layer->xsize || !layer->ysize)
@@ -1587,6 +1872,11 @@ void RSDK::DrawLayerVScroll(TileLayer *layer)
 }
 void RSDK::DrawLayerRotozoom(TileLayer *layer)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    PSPDrawComparedTitle(layer, 1);
+    return;
+#endif
+
     if (!layer->xsize || !layer->ysize)
         return;
 
@@ -1598,6 +1888,40 @@ void RSDK::DrawLayerRotozoom(TileLayer *layer)
     int32 width    = (TILE_SIZE << layer->widthShift) - 1;
     int32 height   = (TILE_SIZE << layer->heightShift) - 1;
     int32 lineSize = currentScreen->clipBound_X2 - currentScreen->clipBound_X1;
+
+#if RETRO_PLATFORM == RETRO_PSP
+    // Same pixels as the loop below. That loop reloads scanline->deform and layer->widthShift for every pixel
+    // (the framebuffer stores may alias them under -fno-strict-aliasing) and multiplies to index the tileset;
+    // on the PSP this layer type (the title screen's clouds/island) costs ~10ms a frame. Keep it all in registers:
+    // TILE_SIZE * (y + TILE_SIZE * tile) + x == (tile << 8) + ((posY >> 12) & 0xF0) + ((posX >> 16) & 0xF).
+    int32 maskX    = width >> 4;
+    int32 maskY    = height >> 4;
+    int32 shiftW   = layer->widthShift;
+    int32 fbOffset = currentScreen->pitch - lineSize;
+    for (int32 cy = currentScreen->clipBound_Y1; cy < currentScreen->clipBound_Y2; ++cy) {
+        int32 posX            = scanline->position.x;
+        int32 posY            = scanline->position.y;
+        int32 deformX         = scanline->deform.x;
+        int32 deformY         = scanline->deform.y;
+        uint16 *activePalette = fullPalette[*lineBuffer++];
+
+        for (int32 cx = 0; cx < lineSize; ++cx) {
+            int32 tile = layout[(maskX & (posX >> 20)) + ((maskY & (posY >> 20)) << shiftW)] & 0xFFF;
+            uint8 idx  = tilesetPixels[(tile << 8) + ((posY >> 12) & 0xF0) + ((posX >> 16) & 0xF)];
+
+            if (idx)
+                *frameBuffer = activePalette[idx];
+
+            posX += deformX;
+            posY += deformY;
+            ++frameBuffer;
+        }
+
+        frameBuffer += fbOffset;
+        ++scanline;
+    }
+    return;
+#endif
 
     for (int32 cy = currentScreen->clipBound_Y1; cy < currentScreen->clipBound_Y2; ++cy) {
         int32 posX = scanline->position.x;
@@ -1630,6 +1954,11 @@ void RSDK::DrawLayerRotozoom(TileLayer *layer)
 }
 void RSDK::DrawLayerBasic(TileLayer *layer)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    PSPDrawComparedTitle(layer, 0);
+    return;
+#endif
+
     if (!layer->xsize || !layer->ysize)
         return;
 

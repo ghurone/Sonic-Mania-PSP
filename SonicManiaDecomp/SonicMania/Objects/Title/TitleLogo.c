@@ -9,6 +9,10 @@
 
 ObjectTitleLogo *TitleLogo;
 
+#if defined(__PSP__)
+static uint32 pspTitleDrawMask;
+#endif
+
 void TitleLogo_Update(void)
 {
     RSDK_THIS(TitleLogo);
@@ -35,6 +39,19 @@ void TitleLogo_StaticUpdate(void) {}
 void TitleLogo_Draw(void)
 {
     RSDK_THIS(TitleLogo);
+
+#if defined(__PSP__)
+    if (!(pspTitleDrawMask & (1u << (self->type & 31))) && self->type < 32) {
+        pspTitleDrawMask |= 1u << (self->type & 31);
+        SpriteFrame *frame = self->mainAnimator.frames ? &self->mainAnimator.frames[self->mainAnimator.frameID] : NULL;
+        LogHelpers_Print("PSP diagnostic: TitleLogo draw type=%d pos=%d,%d active=%d visible=%d ani=%d anim=%d frame=%d/%d valid=%d size=%dx%d pivot=%d,%d src=%d,%d sheet=%d screen=%dx%d pitch=%d",
+                         self->type, self->position.x >> 16, self->position.y >> 16, self->active, self->visible, TitleLogo->aniFrames,
+                         self->mainAnimator.animationID, self->mainAnimator.frameID, self->mainAnimator.frameCount, frame != NULL,
+                         frame ? frame->width : 0, frame ? frame->height : 0, frame ? frame->pivotX : 0, frame ? frame->pivotY : 0,
+                         frame ? frame->sprX : 0, frame ? frame->sprY : 0, frame ? frame->sheetID : 0, ScreenInfo->size.x,
+                         ScreenInfo->size.y, ScreenInfo->pitch);
+    }
+#endif
 
     switch (self->type) {
         case TITLELOGO_EMBLEM:
@@ -77,6 +94,10 @@ void TitleLogo_Draw(void)
 void TitleLogo_Create(void *data)
 {
     RSDK_THIS(TitleLogo);
+
+#if defined(__PSP__)
+    LogHelpers_Print("PSP diagnostic: TitleLogo create type=%d pos=%d,%d", self->type, self->position.x >> 16, self->position.y >> 16);
+#endif
 
     self->drawFX = FX_FLIP;
 
@@ -140,9 +161,18 @@ void TitleLogo_Create(void *data)
     }
 }
 
+#if defined(__psp__)
+// "press any button" in Portuguese (LANGUAGE_PT, the PSP port's): its own animation, in the title's lettering
+// (tools/psp_portuguese.py)
+static uint16 pspPressFramesPT = (uint16)-1;
+#endif
+
 void TitleLogo_StageLoad(void)
 {
     TitleLogo->aniFrames = RSDK.LoadSpriteAnimation("Title/Logo.bin", SCOPE_STAGE);
+#if defined(__psp__)
+    pspPressFramesPT = RSDK.LoadSpriteAnimation("Title/PSPPressPT.bin", SCOPE_STAGE);
+#endif
 
 #if MANIA_USE_PLUS
     if (API.CheckDLC(DLC_PLUS))
@@ -187,6 +217,14 @@ void TitleLogo_SetupPressStart(void)
         case LANGUAGE_KO: RSDK.SetSpriteAnimation(TitleLogo->aniFrames, 8, &self->mainAnimator, true, 8); break;
         case LANGUAGE_SC: RSDK.SetSpriteAnimation(TitleLogo->aniFrames, 8, &self->mainAnimator, true, 9); break;
         case LANGUAGE_TC: RSDK.SetSpriteAnimation(TitleLogo->aniFrames, 8, &self->mainAnimator, true, 10); break;
+#endif
+#if defined(__psp__)
+        case LANGUAGE_PT:
+            if (pspPressFramesPT != (uint16)-1)
+                RSDK.SetSpriteAnimation(pspPressFramesPT, 0, &self->mainAnimator, true, 0);
+            else
+                RSDK.SetSpriteAnimation(TitleLogo->aniFrames, 8, &self->mainAnimator, true, 0);
+            break;
 #endif
 
         default: break;

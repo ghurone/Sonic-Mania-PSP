@@ -67,6 +67,9 @@ struct ImageGIF : public Image {
     bool32 Load(const char *fileName, bool32 loadHeader);
 
     GifDecoder *decoder;
+#if RETRO_PLATFORM == RETRO_PSP
+    bool32 pspSheet = false; // Data.psp stores GIFs already decoded (PSP_SHEET_SIGNATURE): see ImageGIF::Load
+#endif
 };
 
 #if RETRO_REV02

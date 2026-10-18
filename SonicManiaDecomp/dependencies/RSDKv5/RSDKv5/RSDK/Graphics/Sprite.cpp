@@ -182,8 +182,299 @@ uint8 TraceGifPrefix(uint32 *prefix, int32 code, int32 clearCode)
 
     return code;
 }
+#if RETRO_PLATFORM == RETRO_PSP
+// Same pixels as the giflib-style decoder below for valid streams (including its code width growth), but with the state
+// in locals, whole sub-blocks consumed at once, and each code's string written straight into place: the table keeps the
+// prefix, first byte and length of every string, instead of re-walking prefix chains and bouncing bytes off a stack.
+// Decoding sprite sheets was most of every scene load on the PSP.
+#define PSP_GIF_PREFIX(entry) ((entry)&0xFFF)
+#define PSP_GIF_FIRST(entry)  (((entry) >> 12) & 0xFF)
+#define PSP_GIF_LENGTH(entry) ((entry) >> 20)
+
+static void PSPReadGifPictureData(ImageGIF *image, int32 width, int32 height, bool32 interlaced, uint8 *pixels)
+{
+    static const int32 passStart[] = { 0, 4, 2, 1 };
+    static const int32 passStep[]  = { 8, 8, 4, 2 };
+
+    GifDecoder *decoder = image->decoder;
+    FileInfo *info      = &image->info;
+    uint32 *table       = decoder->prefix;
+    uint8 *suffix       = decoder->suffix;
+    uint8 *string       = decoder->stack; // strings that can't go straight into place are built here first
+    uint8 *block        = decoder->buffer;
+
+    // Pixels come out in file order. Without interlacing the rows are contiguous, so the whole image is one long line;
+    // interlaced rows come from four passes.
+    const int32 total     = width * height;
+    const int32 lineWidth = interlaced ? width : total;
+    int32 written         = 0;
+    int32 x = 0, y = 0, pass = 0;
+    uint8 *row = pixels;
+#define PSP_GIF_PUT(value)                                                                                                                 \
+    do {                                                                                                                                   \
+        row[x] = (uint8)(value);                                                                                                           \
+        ++written;                                                                                                                         \
+        if (++x == lineWidth && interlaced) {                                                                                              \
+            x = 0;                                                                                                                         \
+            y += passStep[pass];                                                                                                           \
+            while (y >= height && pass < 3) y = passStart[++pass];                                                                         \
+            row = pixels + y * width;                                                                                                      \
+        }                                                                                                                                  \
+    } while (0)
+
+    int32 depth = ReadInt8(info);
+    if (depth >= 1 && depth <= 8) {
+        const uint32 clearCode = 1 << depth;
+        const uint32 eofCode   = clearCode + 1;
+        for (uint32 c = 0; c < clearCode; ++c) table[c] = (1 << 20) | (c << 12) | c;
+
+        uint32 runningCode    = eofCode + 1;
+        uint32 runningBits    = depth + 1;
+        uint32 maxCodePlusOne = 1 << runningBits;
+        int32 prevCode        = -1;
+
+        uint32 bits = 0, bitCount = 0;
+        int32 blockPos = 0, blockSize = 0;
+
+        while (written < total) {
+            while (bitCount < runningBits) {
+                if (blockPos == blockSize) {
+                    blockSize = ReadInt8(info);
+                    blockPos  = 0;
+                    if (!blockSize)
+                        break; // out of data
+                    ReadBytes(info, block, blockSize);
+                }
+                bits |= (uint32)block[blockPos++] << bitCount;
+                bitCount += 8;
+            }
+            if (bitCount < runningBits)
+                break;
+
+            uint32 code = bits & ((1 << runningBits) - 1);
+            bits >>= runningBits;
+            bitCount -= runningBits;
+            if (++runningCode > maxCodePlusOne && runningBits < LZ_BITS) {
+                maxCodePlusOne <<= 1;
+                runningBits++;
+            }
+
+            if (code == clearCode) {
+                runningCode    = eofCode + 1;
+                runningBits    = depth + 1;
+                maxCodePlusOne = 1 << runningBits;
+                prevCode       = -1;
+                continue;
+            }
+            if (code == eofCode)
+                break;
+
+            uint32 newCode = runningCode - 2; // the entry this code defines (from the second code after a clear)
+            uint32 firstByte;
+            if (code < clearCode) {
+                firstByte = code;
+                PSP_GIF_PUT(code);
+            }
+            else {
+                if (prevCode < 0 || code > newCode)
+                    break; // corrupt stream
+
+                // code == newCode: the string being defined right now, prev's string plus its own first byte
+                bool32 defining = code == newCode;
+                uint32 entry    = table[defining ? prevCode : code];
+                uint32 length   = PSP_GIF_LENGTH(entry) + (defining ? 1 : 0);
+                firstByte       = PSP_GIF_FIRST(entry);
+
+                bool32 inPlace = !interlaced && written + (int32)length <= total;
+                uint8 *out     = (inPlace ? row + x : string) + length - 1;
+                uint32 c       = code;
+                if (defining) {
+                    *out-- = (uint8)firstByte;
+                    c      = prevCode;
+                }
+                while (c > eofCode) {
+                    *out-- = suffix[c];
+                    c      = PSP_GIF_PREFIX(table[c]);
+                }
+                *out = (uint8)c;
+
+                if (inPlace) {
+                    x += length;
+                    written += length;
+                }
+                else {
+                    for (uint32 i = 0; i < length && written < total; ++i) PSP_GIF_PUT(string[i]);
+                }
+            }
+
+            if (prevCode >= 0 && newCode <= (uint32)LZ_MAX_CODE) {
+                uint32 prevEntry = table[prevCode];
+                suffix[newCode]  = (uint8)firstByte;
+                table[newCode]   = ((PSP_GIF_LENGTH(prevEntry) + 1) << 20) | (prevEntry & 0xFF000) | (uint32)prevCode;
+            }
+            prevCode = code;
+        }
+    }
+
+    // a short stream leaves the rest transparent, like the original decoder reading zeros past the end
+    while (written < total) PSP_GIF_PUT(0);
+#undef PSP_GIF_PUT
+}
+// Non-interlaced images (every sprite sheet) decode into one contiguous run of pixels, so each LZW code's string is
+// already somewhere in the output: where its prefix string was written, one byte longer. Decoding a code is then a
+// copy from earlier output instead of a walk down its prefix chain (one dependent load per pixel). Same pixels.
+static void PSPReadGifPictureDataLinear(ImageGIF *image, int32 total, uint8 *pixels)
+{
+    static int32 codePos[LZ_MAX_CODE + 2];
+    static uint16 codeLen[LZ_MAX_CODE + 2];
+
+    GifDecoder *decoder = image->decoder;
+    FileInfo *info      = &image->info;
+    uint8 *block        = decoder->buffer;
+    int32 written       = 0;
+
+    int32 depth = ReadInt8(info);
+    if (depth >= 1 && depth <= 8) {
+        const uint32 clearCode = 1 << depth;
+        const uint32 eofCode   = clearCode + 1;
+
+        uint32 runningCode    = eofCode + 1;
+        uint32 runningBits    = depth + 1;
+        uint32 maxCodePlusOne = 1 << runningBits;
+        int32 prevCode        = -1;
+        int32 prevPos = 0, prevLen = 0;
+
+        uint32 bits = 0, bitCount = 0;
+        int32 blockPos = 0, blockSize = 0;
+
+        while (written < total) {
+            while (bitCount < runningBits) {
+                if (blockPos == blockSize) {
+                    blockSize = ReadInt8(info);
+                    blockPos  = 0;
+                    if (!blockSize)
+                        break; // out of data
+                    ReadBytes(info, block, blockSize);
+                }
+                bits |= (uint32)block[blockPos++] << bitCount;
+                bitCount += 8;
+            }
+            if (bitCount < runningBits)
+                break;
+
+            uint32 code = bits & ((1 << runningBits) - 1);
+            bits >>= runningBits;
+            bitCount -= runningBits;
+            if (++runningCode > maxCodePlusOne && runningBits < LZ_BITS) {
+                maxCodePlusOne <<= 1;
+                runningBits++;
+            }
+
+            if (code == clearCode) {
+                runningCode    = eofCode + 1;
+                runningBits    = depth + 1;
+                maxCodePlusOne = 1 << runningBits;
+                prevCode       = -1;
+                continue;
+            }
+            if (code == eofCode)
+                break;
+
+            uint32 newCode = runningCode - 2; // the entry this code defines (from the second code after a clear)
+            int32 start    = written;
+            int32 length;
+            if (code < clearCode) {
+                pixels[written++] = (uint8)code;
+                length            = 1;
+            }
+            else {
+                if (prevCode < 0 || code > newCode)
+                    break; // corrupt stream
+
+                // code == newCode: the string being defined right now, prev's string plus its own first byte
+                const uint8 *src;
+                if (code == newCode) {
+                    src    = &pixels[prevPos];
+                    length = prevLen + 1;
+                }
+                else {
+                    src    = &pixels[codePos[code]];
+                    length = codeLen[code];
+                }
+                int32 copy = MIN(length, total - written);
+                // prev's string then its first byte when code == newCode; the copy never overlaps its source (the
+                // source ends where this string starts). Most strings are short: a call to memcpy costs more.
+                int32 head = code == newCode ? MIN(prevLen, copy) : copy;
+                uint8 *dst = &pixels[written];
+                if (head <= 16) {
+                    for (int32 i = 0; i < head; ++i) dst[i] = src[i];
+                }
+                else {
+                    memcpy(dst, src, head);
+                }
+                if (copy > head)
+                    dst[head] = src[0];
+                written += copy;
+            }
+
+            if (prevCode >= 0 && newCode <= (uint32)LZ_MAX_CODE) {
+                codePos[newCode] = prevPos;
+                codeLen[newCode] = (uint16)(prevLen + 1);
+            }
+            prevCode = code;
+            prevPos  = start;
+            prevLen  = length;
+        }
+    }
+
+    // a short stream leaves the rest transparent, like the original decoder reading zeros past the end
+    if (written < total)
+        memset(&pixels[written], 0, total - written);
+}
+
+#undef PSP_GIF_PREFIX
+#undef PSP_GIF_FIRST
+#undef PSP_GIF_LENGTH
+#endif
+
 void ReadGifPictureData(ImageGIF *image, int32 width, int32 height, bool32 interlaced, uint8 *pixels)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+#if PSP_GIF_VERIFY
+    int32 dataStart = image->info.readPos;
+#endif
+    unsigned long long gifStart = PSPProfNow();
+    if (!interlaced)
+        PSPReadGifPictureDataLinear(image, width * height, pixels);
+    else
+        PSPReadGifPictureData(image, width, height, interlaced, pixels);
+    pspLoadGifUS += PSPProfNow() - gifStart; // (includes the reads it does)
+#if PSP_GIF_VERIFY
+    // diagnostics: decode again with the original code, one row at a time, and compare
+    static int32 verified = 0, mismatched = 0;
+    Seek_Set(&image->info, dataStart);
+    uint8 *line = (uint8 *)malloc(width ? width : 1);
+    if (line) {
+        static const int32 starts[] = { 0, 4, 2, 1 }, steps[] = { 8, 8, 4, 2 };
+        int32 badRows = 0;
+        InitGifDecoder(image);
+        for (int32 p = interlaced ? 0 : 3; p < 4; ++p) {
+            for (int32 y = interlaced ? starts[p] : 0; y < height; y += interlaced ? steps[p] : 1) {
+                ReadGifLine(image, line, width, 0);
+                badRows += memcmp(line, pixels + y * width, width) != 0;
+            }
+        }
+        free(line);
+        ++verified;
+        if (badRows)
+            ++mismatched;
+        if (badRows || !(verified % 25))
+            PrintLog(PRINT_NORMAL, "PSP gif verify: %dx%d interlaced=%d bad rows=%d (%d images, %d mismatched)", width, height, interlaced, badRows,
+                     verified, mismatched);
+    }
+#endif
+    return;
+#endif
     int32 initialRows[] = { 0, 4, 2, 1 };
     int32 rowInc[]      = { 8, 8, 4, 2 };
 
@@ -199,6 +490,76 @@ void ReadGifPictureData(ImageGIF *image, int32 width, int32 height, bool32 inter
     for (int32 h = 0; h < height; ++h) ReadGifLine(image, pixels, width, h * width);
 }
 
+#if RETRO_PLATFORM == RETRO_PSP
+// Data.psp (tools/build_psp_data.py) stores every GIF already decoded:
+//   0 'PSHT', 4 u16 version (1), 6 u16 width, 8 u16 height (where a GIF has them), 10 u32 packed size, 14 u16 0,
+//   16 the palette (256 x RGB), 784 the pixels (width x height palette indices) as an LZ4 block.
+// Unpacking LZ4 costs a fraction of LZW decoding, and the LZ4 data is smaller than the GIF was.
+#define PSP_SHEET_SIGNATURE (0x54485350) // "PSHT"
+
+// LZ4 block format; returns the bytes written, or -1 if the data doesn't fit in dst or is malformed
+static int32 PSPLz4Decode(const uint8 *src, int32 srcSize, uint8 *dst, int32 dstSize)
+{
+    const uint8 *ip = src, *iend = src + srcSize;
+    uint8 *op = dst, *oend = dst + dstSize;
+    while (ip < iend) {
+        uint32 token = *ip++;
+        uint32 len   = token >> 4;
+        if (len == 15) {
+            uint8 b;
+            do {
+                if (ip >= iend)
+                    return -1;
+                b = *ip++;
+                len += b;
+            } while (b == 255);
+        }
+        if (len > (uint32)(iend - ip) || len > (uint32)(oend - op))
+            return -1;
+        memcpy(op, ip, len);
+        op += len;
+        ip += len;
+        if (ip >= iend)
+            break; // the last sequence is literals only
+
+        if (iend - ip < 2)
+            return -1;
+        uint32 offset = ip[0] | (ip[1] << 8);
+        ip += 2;
+        if (!offset || offset > (uint32)(op - dst))
+            return -1;
+
+        len = token & 15;
+        if (len == 15) {
+            uint8 b;
+            do {
+                if (ip >= iend)
+                    return -1;
+                b = *ip++;
+                len += b;
+            } while (b == 255);
+        }
+        len += 4;
+        if (len > (uint32)(oend - op))
+            return -1;
+
+        const uint8 *match = op - offset;
+        if (offset >= len) {
+            memcpy(op, match, len);
+            op += len;
+        }
+        else if (offset == 1) {
+            memset(op, *match, len); // runs of one colour: the bulk of a sprite sheet's empty space
+            op += len;
+        }
+        else {
+            while (len--) *op++ = *match++;
+        }
+    }
+    return (int32)(op - dst);
+}
+#endif
+
 bool32 ImageGIF::Load(const char *fileName, bool32 loadHeader)
 {
     if (!decoder)
@@ -208,6 +569,9 @@ bool32 ImageGIF::Load(const char *fileName, bool32 loadHeader)
         if (!LoadFile(&info, fileName, FMODE_RB))
             return false;
 
+#if RETRO_PLATFORM == RETRO_PSP
+        pspSheet = ReadInt32(&info, false) == PSP_SHEET_SIGNATURE;
+#endif
         Seek_Set(&info, 6);
         width  = ReadInt16(&info);
         height = ReadInt16(&info);
@@ -215,6 +579,38 @@ bool32 ImageGIF::Load(const char *fileName, bool32 loadHeader)
         if (loadHeader)
             return true;
     }
+
+#if RETRO_PLATFORM == RETRO_PSP
+    if (pspSheet) {
+        unsigned long long start = PSPProfNow();
+        Seek_Set(&info, 10);
+        int32 packed = ReadInt32(&info, false);
+        Seek_Set(&info, 16);
+
+        if (!palette)
+            AllocateStorage((void **)&palette, 0x100 * sizeof(int32), DATASET_TMP, true);
+        if (!pixels)
+            AllocateStorage((void **)&pixels, width * height, DATASET_TMP, false);
+
+        uint8 *src = NULL;
+        AllocateStorage((void **)&src, MAX(packed, 0x300), DATASET_TMP, false);
+
+        int32 size = -1;
+        if (palette && pixels && src) {
+            ReadBytes(&info, src, 0x300);
+            for (int32 c = 0; c < 0x100; ++c) palette[c] = (src[c * 3] << 16) | (src[c * 3 + 1] << 8) | (src[c * 3 + 2] << 0);
+
+            ReadBytes(&info, src, packed);
+            size = PSPLz4Decode(src, packed, pixels, width * height);
+            if (size != width * height)
+                PrintLog(PRINT_NORMAL, "PSP: bad sheet data (%d of %d pixels)", size, width * height);
+        }
+        RemoveStorageEntry((void **)&src);
+        Close();
+        pspLoadGifUS += PSPProfNow() - start;
+        return size == width * height;
+    }
+#endif
 
     int32 data = ReadInt8(&info);
     // int32 has_pallete  = (data & 0x80) >> 7;
@@ -905,6 +1301,9 @@ bool32 RSDK::ImageTGA::Load(const char *fileName, bool32 loadHeader)
 
 uint16 RSDK::LoadSpriteSheet(const char *filename, uint8 scope)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    PSPLoadTimer loadTimer(PSPLOAD_SHEET);
+#endif
     char fullFilePath[0x100];
     sprintf_s(fullFilePath, sizeof(fullFilePath), "Data/Sprites/%s", filename);
 
@@ -988,6 +1387,22 @@ bool32 RSDK::LoadImage(const char *filename, double displayLength, double fadeSp
 {
     char fullFilePath[0x100];
     sprintf_s(fullFilePath, sizeof(fullFilePath), "Data/Images/%s", filename);
+
+#if RETRO_PLATFORM == RETRO_PSP
+    // Data.psp holds these 1024x512 images as one JPEG frame (decoding the PNG would take 2MB of RAM the PSP lacks)
+    if (PSPLoadImageFrame(fullFilePath)) {
+        engine.displayTime        = displayLength;
+        engine.storedShaderID     = videoSettings.shaderID;
+        engine.storedState        = sceneInfo.state;
+        videoSettings.dimMax      = 0.0;
+        videoSettings.shaderID    = SHADER_RGB_IMAGE;
+        videoSettings.screenCount = 0; // "Image Display Mode"
+        engine.skipCallback       = skipCallback;
+        sceneInfo.state           = ENGINESTATE_SHOWIMAGE;
+        engine.imageFadeSpeed     = fadeSpeed / 60.0;
+        return true;
+    }
+#endif
 
 #if RETRO_REV02
     ImagePNG image;

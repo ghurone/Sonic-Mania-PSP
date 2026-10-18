@@ -36,6 +36,9 @@ struct EntityOptionsMenu {
 extern ObjectOptionsMenu *OptionsMenu;
 
 // Standard Entity Events
+#if defined(__psp__)
+bool32 OptionsMenu_DrawPortugueseLabel(EntityUIButton *button, Vector2 *drawPos);
+#endif
 void OptionsMenu_Update(void);
 void OptionsMenu_LateUpdate(void);
 void OptionsMenu_StaticUpdate(void);

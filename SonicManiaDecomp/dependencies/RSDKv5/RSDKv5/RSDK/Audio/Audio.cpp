@@ -23,10 +23,294 @@ int32 streamBufferSize = 0;
 uint32 streamStartPos  = 0;
 int32 streamLoopPoint  = 0;
 
+// SFX sample storage. PSP keeps the raw S16 data (half the memory of F32) and scales while mixing.
+#if RETRO_PLATFORM == RETRO_PSP
+typedef int16 SFX_SAMPLE;
+#define SFX_SAMPLE_SCALE (0.75f / (float)0x8000)
+#else
+typedef float SFX_SAMPLE;
+#define SFX_SAMPLE_SCALE (1.0f)
+#endif
+
 #define LINEAR_INTERPOLATION_LOOKUP_DIVISOR 0x40 // Determines the 'resolution' of the lookup table.
 #define LINEAR_INTERPOLATION_LOOKUP_LENGTH  (TO_FIXED(1) / LINEAR_INTERPOLATION_LOOKUP_DIVISOR)
 
 float linearInterpolationLookup[LINEAR_INTERPOLATION_LOOKUP_LENGTH];
+
+#if RETRO_PLATFORM == RETRO_PSP
+// ---------------------------------------------------------------------------------------------------------------
+// Music as ATRAC3 (tools/convert_music.py): Music/<pack hash of the .ogg path>.at3 next to Data.rsdk. The PSP decodes
+// ATRAC3 on its Media Engine (sceAtrac), so the main CPU no longer spends ~1-2ms a frame on Vorbis, and the track
+// streams from the Memory Stick through a small buffer instead of being loaded whole into RAM at every stage load.
+// Without the file the OGG plays as before.
+// ---------------------------------------------------------------------------------------------------------------
+#include <pspatrac3.h>
+#include <psputility.h>
+#include <pspiofilemgr.h>
+#include <unistd.h>
+
+#define PSP_AT3_BUFFER (64 * 1024) // ~4s at 132kbps
+#define PSP_AT3_READ   (16 * 1024) // the most the audio thread reads at once
+
+static uint8 pspAt3Buffer[PSP_AT3_BUFFER] __attribute__((aligned(64)));
+static int16 pspAt3Pcm[2048] __attribute__((aligned(64))); // one decoded frame: 1024 stereo samples
+static int32 pspAt3PcmPos, pspAt3PcmCount;
+static int32 pspAt3ID     = -1;
+static SceUID pspAt3File  = -1;
+static int32 pspAt3Base   = 0; // where the track starts in that file (Data.psp entry, or 0 for Music/*.at3)
+static SceUID pspAt3Sema  = -1;
+static bool pspAt3Modules = false;
+static bool pspAt3Streaming; // the file is larger than the buffer: the audio thread keeps it topped up
+static bool pspAt3Ended;     // the decoder returned the last frame
+static bool pspAt3Active;    // the stream channel plays ATRAC3 (else Vorbis)
+static uint32 pspAt3NextSample; // the decoder's position, what GetChannelPos reports (like Vorbis's current_loc)
+// (diagnostics: the sceAtrac call in progress, 0 = none, for PSPLink to read when the Media Engine hangs)
+volatile int pspAt3Step;
+#define PSP_AT3_CALL(step, call) (pspAt3Step = (step), pspAt3CallEnd(call))
+static inline int pspAt3CallEnd(int result)
+{
+    pspAt3Step = 0;
+    return result;
+}
+
+// The stream's file, opened again after the PSP slept (sleep mode closes it) or when a read fails
+extern volatile int pspResumeCount; // PSPRenderDevice.cpp
+static char pspAt3Path[0x100];
+static int32 pspAt3FileResume;
+static int32 pspAt3DecoderResume; // the resume the decoder was set up after (sleep powers the Media Engine down)
+static int32 pspAt3DecodeFails;   // decodes failed in a row: the decoder is set up again past a second's worth
+static volatile bool pspAt3Reset;
+extern volatile int pspPowerFlags;
+
+static void PSPAt3Reopen()
+{
+    if (pspAt3File >= 0)
+        sceIoClose(pspAt3File);
+    pspAt3FileResume = pspResumeCount;
+    pspAt3File       = sceIoOpen(pspAt3Path, PSP_O_RDONLY, 0);
+}
+
+// The game's folder, for opening the music by its whole path: after sleep the audio thread, which reopens it, has no
+// current directory any more (sceIoOpen of "Data.psp" then fails with 0x8002032C)
+static char pspAt3Dir[0x100];
+
+static void PSPAt3FullPath(char *path, int32 size, const char *name)
+{
+    if (strchr(name, ':') || !pspAt3Dir[0])
+        sprintf_s(path, size, "%s", name);
+    else
+        sprintf_s(path, size, "%s/%s", pspAt3Dir, name);
+}
+
+static void PSPAt3Init()
+{
+    if (!getcwd(pspAt3Dir, sizeof(pspAt3Dir)))
+        pspAt3Dir[0] = 0;
+    int avcodec = sceUtilityLoadModule(PSP_MODULE_AV_AVCODEC);
+    int atrac   = sceUtilityLoadModule(PSP_MODULE_AV_ATRAC3PLUS);
+    // 0x80020139: already loaded
+    pspAt3Modules = (avcodec >= 0 || avcodec == (int)0x80020139) && (atrac >= 0 || atrac == (int)0x80020139);
+    if (pspAt3Sema < 0)
+        pspAt3Sema = sceKernelCreateSema("rsdk_at3", 0, 1, 1, NULL);
+    PrintLog(PRINT_NORMAL, "PSP at3: modules %08X %08X, folder %s", avcodec, atrac, pspAt3Dir);
+}
+
+static void PSPAt3Close()
+{
+    if (pspAt3ID >= 0)
+        PSP_AT3_CALL(1, sceAtracReleaseAtracID(pspAt3ID));
+    if (pspAt3File >= 0)
+        sceIoClose(pspAt3File);
+    pspAt3ID     = -1;
+    pspAt3File   = -1;
+    pspAt3Active = false;
+}
+
+// Plays on from sample (reading in whatever the decoder needs from there when streaming).
+static bool PSPAt3Seek(uint32 sample)
+{
+    pspAt3PcmPos = pspAt3PcmCount = 0;
+    pspAt3Ended                   = false;
+    pspAt3NextSample              = sample;
+    if (!pspAt3Streaming)
+        return PSP_AT3_CALL(4, sceAtracResetPlayPosition(pspAt3ID, sample, 0, 0)) >= 0;
+
+    if (pspAt3FileResume != pspResumeCount)
+        PSPAt3Reopen();
+    PspBufferInfo info;
+    if (PSP_AT3_CALL(3, sceAtracGetBufferInfoForReseting(pspAt3ID, sample, &info)) < 0)
+        return false;
+    int32 first = 0, second = 0;
+    if (info.uiWritableByteFirstBuf) {
+        sceIoLseek32(pspAt3File, pspAt3Base + info.uiReadPositionFirstBuf, PSP_SEEK_SET);
+        first = sceIoRead(pspAt3File, info.pucWritePositionFirstBuf, info.uiWritableByteFirstBuf);
+    }
+    if (info.uiWritableByteSecondBuf) {
+        sceIoLseek32(pspAt3File, pspAt3Base + info.uiReadPositionSecondBuf, PSP_SEEK_SET);
+        second = sceIoRead(pspAt3File, info.pucWritePositionSecondBuf, info.uiWritableByteSecondBuf);
+    }
+    return first >= 0 && second >= 0 && PSP_AT3_CALL(4, sceAtracResetPlayPosition(pspAt3ID, sample, first, second)) >= 0;
+}
+
+static bool PSPAt3Open(const char *oggPath, uint32 startSample)
+{
+    if (!pspAt3Modules)
+        return false;
+
+    // the track in Data.psp, else Music/<hash>.at3 next to it
+    char path[0x100];
+    SceUID file = -1;
+    int32 base = 0, size = 0;
+    RSDKFileInfo *entry = PSPFindDataFile(oggPath);
+    if (entry && entry->pspKind == PSP_PACK_AT3) {
+        PSPAt3FullPath(path, sizeof(path), dataPacks[entry->packID].name);
+        file = sceIoOpen(path, PSP_O_RDONLY, 0);
+        base = entry->offset;
+        size = entry->size;
+    }
+    else {
+        char lower[0x100];
+        StringLowerCase(lower, oggPath);
+        RETRO_HASH_MD5(hash);
+        GEN_HASH_MD5_BUFFER(lower, hash);
+        sprintf_s(path, sizeof(path), "%sMusic/%08X%08X%08X%08X.at3", SKU::userFileDir, hash[0], hash[1], hash[2], hash[3]);
+        file = sceIoOpen(path, PSP_O_RDONLY, 0);
+        if (file >= 0)
+            size = sceIoLseek32(file, 0, PSP_SEEK_END);
+    }
+    if (file < 0) {
+        static int32 lastError;
+        if (file != lastError) // (once per kind of failure: retried often after sleep)
+            PrintLog(PRINT_NORMAL, "PSP at3: can't open %s (%08X)", path, file);
+        lastError = file;
+        return false;
+    }
+    sceIoLseek32(file, base, PSP_SEEK_SET);
+    int32 bytes = sceIoRead(file, pspAt3Buffer, MIN(size, PSP_AT3_BUFFER));
+    int32 id    = bytes > 0 ? PSP_AT3_CALL(2, sceAtracSetDataAndGetID(pspAt3Buffer, size <= PSP_AT3_BUFFER ? size : PSP_AT3_BUFFER)) : -1;
+    if (id < 0) {
+        PrintLog(PRINT_NORMAL, "PSP at3: %s rejected (%08X), playing the OGG", path, id);
+        sceIoClose(file);
+        return false;
+    }
+
+    PrintLog(PRINT_NORMAL, "PSP at3: %s from %s", oggPath, base ? "Data.psp" : path);
+    pspAt3ID        = id;
+    pspAt3Base      = base;
+    pspAt3Streaming = size > PSP_AT3_BUFFER;
+    pspAt3File      = file;
+    strcpy(pspAt3Path, path);
+    pspAt3FileResume = pspResumeCount;
+    if (!pspAt3Streaming) {
+        sceIoClose(file);
+        pspAt3File = -1;
+    }
+    pspAt3PcmPos = pspAt3PcmCount = 0;
+    pspAt3Ended                   = false;
+    pspAt3NextSample              = 0;
+    pspAt3DecoderResume           = pspResumeCount;
+    pspAt3DecodeFails             = 0;
+    if (startSample)
+        PSPAt3Seek(startSample);
+    pspAt3Active = true;
+    return true;
+}
+
+// Audio thread, outside the mixer lock: tops the decoder's buffer up from the Memory Stick. The file is opened again
+// after the PSP slept (which closes it) or when a read fails.
+static void PSPAt3Refill()
+{
+    if (pspAt3Sema < 0)
+        return;
+    sceKernelWaitSema(pspAt3Sema, 1, NULL);
+    static uint32 resumeSample;
+    static int32 resumeTries;
+    if (pspAt3ID >= 0 && (pspAt3DecoderResume != pspResumeCount || pspAt3Reset)) {
+        PrintLog(PRINT_NORMAL, "PSP at3: decoder set up again (resume %d, power flags %08X, %s)", pspResumeCount, pspPowerFlags,
+                 pspAt3Reset ? "decodes kept failing" : "back from sleep");
+        pspAt3Reset = false;
+        // back from sleep: the Media Engine lost the decoder, so the track is set up again where it had got to (from
+        // the stream channel's own file name: the music the mixer plays)
+        resumeSample = pspAt3NextSample;
+        resumeTries  = 2000; // (mixes: ~15 s, a try every 8 of them, while the Memory Stick comes back from sleep)
+        PSPAt3Close();
+    }
+    if (resumeTries > 0 && pspAt3ID < 0) {
+        if ((resumeTries & 7) == 0 && PSPAt3Open(streamFilePath, resumeSample)) {
+            PrintLog(PRINT_NORMAL, "PSP at3: music back after sleep (%d tries left)", resumeTries);
+            resumeTries = 0;
+        }
+        else if (--resumeTries == 0) {
+            PrintLog(PRINT_NORMAL, "PSP at3: music not back after sleep");
+        }
+    }
+    if (pspAt3ID >= 0 && pspAt3Streaming) {
+        u8 *writePos   = NULL;
+        u32 available  = 0;
+        u32 readOffset = 0;
+        if (PSP_AT3_CALL(6, sceAtracGetStreamDataInfo(pspAt3ID, &writePos, &available, &readOffset)) >= 0 && available > 0) {
+            if (pspAt3FileResume != pspResumeCount)
+                PSPAt3Reopen();
+            int32 read = -1;
+            if (pspAt3File >= 0 && sceIoLseek32(pspAt3File, pspAt3Base + readOffset, PSP_SEEK_SET) >= 0)
+                read = sceIoRead(pspAt3File, writePos, MIN(available, (u32)PSP_AT3_READ));
+            if (read < 0)
+                PSPAt3Reopen(); // (tried again on the next refill, the music going on from its buffer meanwhile)
+            if (read > 0)
+                PSP_AT3_CALL(7, sceAtracAddStreamData(pspAt3ID, read));
+        }
+    }
+    sceKernelSignalSema(pspAt3Sema, 1);
+}
+
+// The mixer's stream refill: the next MIX_BUFFER_SIZE samples, looping at streamLoopPoint like the Vorbis path.
+static void PSPAt3Fill(ChannelInfo *channel)
+{
+    float *out     = channel->samplePtr;
+    int32 filled   = 0;
+    while (filled < MIX_BUFFER_SIZE) {
+        if (pspAt3PcmPos >= pspAt3PcmCount) {
+            if (pspAt3Ended) {
+                if (channel->loop == 1 && PSPAt3Seek(streamLoopPoint))
+                    continue;
+                channel->state   = CHANNEL_IDLE;
+                channel->soundID = -1;
+                break;
+            }
+            int n = 0, end = 0, remain = 0;
+            int r = PSP_AT3_CALL(5, sceAtracDecodeData(pspAt3ID, (u16 *)pspAt3Pcm, &n, &end, &remain));
+            if (r < 0) {
+                if (r == (int)PSP_ATRAC_ERROR_ALLDATA_WAS_DECODED) {
+                    pspAt3Ended = true;
+                    continue;
+                }
+                // starved (the Memory Stick fell behind): silence until the buffer catches up. For a second on end,
+                // the decoder is gone (sleep powers the Media Engine down): set up again (PSPAt3Refill)
+                if (++pspAt3DecodeFails == 50) {
+                    PrintLog(PRINT_NORMAL, "PSP at3: decodes failing (%08X)", r);
+                    pspAt3Reset = true;
+                }
+                break;
+            }
+            pspAt3DecodeFails = 0;
+            pspAt3PcmPos   = 0;
+            pspAt3PcmCount = n * 2;
+            pspAt3NextSample += n;
+            if (end)
+                pspAt3Ended = true;
+            if (!pspAt3PcmCount && !pspAt3Ended)
+                break;
+        }
+        int32 take = MIN(pspAt3PcmCount - pspAt3PcmPos, MIX_BUFFER_SIZE - filled);
+        const int16 *pcm = &pspAt3Pcm[pspAt3PcmPos];
+        for (int32 i = 0; i < take; ++i) out[filled + i] = pcm[i] * (0.5f / 32768.0f); // the Vorbis path's level
+        pspAt3PcmPos += take;
+        filled += take;
+    }
+    if (filled < MIX_BUFFER_SIZE)
+        memset(&out[filled], 0, (MIX_BUFFER_SIZE - filled) * sizeof(float));
+}
+#endif
 
 #if RETRO_AUDIODEVICE_XAUDIO
 #include "XAudio/XAudioDevice.cpp"
@@ -38,6 +322,8 @@ float linearInterpolationLookup[LINEAR_INTERPOLATION_LOOKUP_LENGTH];
 #include "MiniAudio/MiniAudioDevice.cpp"
 #elif RETRO_AUDIODEVICE_OBOE
 #include "Oboe/OboeAudioDevice.cpp"
+#elif RETRO_AUDIODEVICE_PSP
+#include "PSP/PSPAudioDevice.cpp"
 #endif
 
 uint8 AudioDeviceBase::initializedAudioChannels = false;
@@ -50,6 +336,9 @@ void AudioDeviceBase::Release()
 #if !RETRO_USE_ORIGINAL_CODE
     stb_vorbis_close(vorbisInfo);
     vorbisInfo = NULL;
+#endif
+#if RETRO_PLATFORM == RETRO_PSP
+    PSPAt3Close();
 #endif
 }
 
@@ -68,7 +357,7 @@ void AudioDeviceBase::ProcessAudioMixing(void *stream, int32 length)
             case CHANNEL_IDLE: break;
 
             case CHANNEL_SFX: {
-                SAMPLE_FORMAT *sfxBuffer = &channel->samplePtr[channel->bufferPos];
+                SFX_SAMPLE *sfxBuffer = (SFX_SAMPLE *)channel->samplePtr + channel->bufferPos;
 
                 float volL = channel->volume, volR = channel->volume;
                 if (channel->pan < 0.0f)
@@ -89,8 +378,9 @@ void AudioDeviceBase::ProcessAudioMixing(void *stream, int32 length)
                         sample = 0;
                     else
 #endif
-                        sample = (sfxBuffer[1] - sfxBuffer[0]) * linearInterpolationLookup[speedPercent / LINEAR_INTERPOLATION_LOOKUP_DIVISOR]
-                                 + sfxBuffer[0];
+                        sample = ((float)(sfxBuffer[1] - sfxBuffer[0]) * linearInterpolationLookup[speedPercent / LINEAR_INTERPOLATION_LOOKUP_DIVISOR]
+                                  + sfxBuffer[0])
+                                 * SFX_SAMPLE_SCALE;
 
                     speedPercent += channel->speed;
                     sfxBuffer += FROM_FIXED(speedPercent);
@@ -111,7 +401,7 @@ void AudioDeviceBase::ProcessAudioMixing(void *stream, int32 length)
                             channel->bufferPos -= (uint32)channel->sampleLength;
                             channel->bufferPos += channel->loop;
 
-                            sfxBuffer = &channel->samplePtr[channel->bufferPos];
+                            sfxBuffer = (SFX_SAMPLE *)channel->samplePtr + channel->bufferPos;
                         }
                     }
                 }
@@ -183,6 +473,17 @@ void AudioDeviceBase::InitAudioChannels()
 
 void RSDK::UpdateStreamBuffer(ChannelInfo *channel)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    if (pspAt3Active) {
+        PSPAt3Fill(channel);
+        return;
+    }
+    if (!vorbisInfo) {
+        // (the ATRAC3 track being set up again after sleep: silence meanwhile)
+        memset(channel->samplePtr, 0, MIX_BUFFER_SIZE * sizeof(float));
+        return;
+    }
+#endif
     int32 bufferRemaining = MIX_BUFFER_SIZE;
     float *buffer         = channel->samplePtr;
 
@@ -215,6 +516,23 @@ void RSDK::LoadStream(ChannelInfo *channel)
         return;
 
     stb_vorbis_close(vorbisInfo);
+    vorbisInfo = NULL;
+
+#if RETRO_PLATFORM == RETRO_PSP
+    if (pspAt3Sema >= 0)
+        sceKernelWaitSema(pspAt3Sema, 1, NULL);
+    PSPAt3Close();
+    bool32 at3 = PSPAt3Open(streamFilePath, streamStartPos);
+    if (at3) {
+        streamBufferSize = 0;
+        UpdateStreamBuffer(channel);
+        channel->state = CHANNEL_STREAM;
+    }
+    if (pspAt3Sema >= 0)
+        sceKernelSignalSema(pspAt3Sema, 1);
+    if (at3)
+        return;
+#endif
 
     FileInfo info;
     InitFileInfo(&info);
@@ -223,12 +541,23 @@ void RSDK::LoadStream(ChannelInfo *channel)
         streamBufferSize = info.fileSize;
         streamBuffer     = NULL;
         AllocateStorage((void **)&streamBuffer, info.fileSize, DATASET_MUS, false);
+        if (!streamBuffer) {
+            PrintLog(PRINT_NORMAL, "Unable to allocate music stream: %s (%d bytes)", streamFilePath, info.fileSize);
+            CloseFile(&info);
+            channel->state = CHANNEL_IDLE;
+            return;
+        }
         ReadBytes(&info, streamBuffer, streamBufferSize);
         CloseFile(&info);
 
         if (streamBufferSize > 0) {
             vorbisAlloc.alloc_buffer_length_in_bytes = 512 * 1024; // 512KiB
             AllocateStorage((void **)&vorbisAlloc.alloc_buffer, 512 * 1024, DATASET_MUS, false);
+            if (!vorbisAlloc.alloc_buffer) {
+                PrintLog(PRINT_NORMAL, "Unable to allocate vorbis scratch for %s", streamFilePath);
+                channel->state = CHANNEL_IDLE;
+                return;
+            }
 
             vorbisInfo = stb_vorbis_open_memory(streamBuffer, streamBufferSize, NULL, &vorbisAlloc);
             if (vorbisInfo) {
@@ -292,9 +621,26 @@ int32 RSDK::PlayStream(const char *filename, uint32 slot, uint32 startPos, uint3
     streamStartPos  = startPos;
     streamLoopPoint = loopPoint;
 
+#if RETRO_PLATFORM == RETRO_PSP
+    // Reading a multi-MB track off the Memory Stick under the device lock froze every sound for the whole read.
+    // The mixer skips CHANNEL_LOADING_STREAM, and the one decoder (vorbisInfo) is only touched by the mixer through
+    // a CHANNEL_STREAM channel: retire any other stream here, then load without holding the lock.
+    for (int32 c = 0; c < CHANNEL_COUNT; ++c) {
+        if (c != (int32)slot && channels[c].state == CHANNEL_STREAM) {
+            channels[c].state   = CHANNEL_IDLE;
+            channels[c].soundID = -1;
+        }
+    }
+    UnlockAudioDevice();
+
+    unsigned long long loadStart = PSPProfNow();
+    AudioDevice::HandleStreamLoad(channel, loadASync);
+    PrintLog(PRINT_NORMAL, "PSP stream %s: %ums (%u KB)", filename, (uint32)((PSPProfNow() - loadStart) / 1000), (uint32)streamBufferSize >> 10);
+#else
     AudioDevice::HandleStreamLoad(channel, loadASync);
 
     UnlockAudioDevice();
+#endif
 
     return slot;
 }
@@ -304,6 +650,9 @@ int32 RSDK::PlayStream(const char *filename, uint32 slot, uint32 startPos, uint3
 
 void RSDK::LoadSfxToSlot(char *filename, uint8 slot, uint8 plays, uint8 scope)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    PSPLoadTimer loadTimer(PSPLOAD_SFX);
+#endif
     FileInfo info;
     InitFileInfo(&info);
 
@@ -375,9 +724,31 @@ void RSDK::LoadSfxToSlot(char *filename, uint8 slot, uint8 plays, uint8 scope)
                 if (sampleBits == 16)
                     length /= 2;
 
-                AllocateStorage((void **)&sfxList[slot].buffer, sizeof(float) * length, DATASET_SFX, false);
+                AllocateStorage((void **)&sfxList[slot].buffer, sizeof(SFX_SAMPLE) * length, DATASET_SFX, false);
+                if (!sfxList[slot].buffer) {
+                    CloseFile(&info);
+#if !RETRO_USE_ORIGINAL_CODE
+                    PrintLog(PRINT_ERROR, "Unable to allocate SFX buffer: %s (%u samples)", filename, length);
+#endif
+                    return;
+                }
                 sfxList[slot].length = length;
 
+#if RETRO_PLATFORM == RETRO_PSP
+                // Keep the S16 data as-is; the 0.75 gain and F32 conversion happen in the mixer (SFX_SAMPLE_SCALE).
+                // 8-bit samples end up 25% quieter than on PC, since their full gain would overflow S16.
+                int16 *buffer = (int16 *)sfxList[slot].buffer;
+                if (sampleBits == 8) {
+                    // one read instead of one per byte: the bytes land in the upper half of the buffer and widen in place,
+                    // front to back (each sample written stays below the next byte read)
+                    uint8 *bytes = (uint8 *)buffer + length;
+                    ReadBytes(&info, bytes, length);
+                    for (int32 s = 0; s < length; ++s) buffer[s] = (int16)((bytes[s] - 0x80) << 8);
+                }
+                else {
+                    ReadBytes(&info, buffer, length * sizeof(int16));
+                }
+#else
                 // Convert the sample data to F32 format
                 float *buffer = (float *)sfxList[slot].buffer;
                 if (sampleBits == 8) {
@@ -400,6 +771,7 @@ void RSDK::LoadSfxToSlot(char *filename, uint8 slot, uint8 plays, uint8 scope)
                         *buffer++ = (sample / (float)0x8000) * 0.75f;
                     }
                 }
+#endif
             }
 #if !RETRO_USE_ORIGINAL_CODE
             else {
@@ -442,6 +814,12 @@ int32 RSDK::PlaySfx(uint16 sfx, uint32 loopPoint, uint32 priority)
 {
     if (sfx >= SFX_COUNT || !sfxList[sfx].scope)
         return -1;
+
+#if !RETRO_USE_ORIGINAL_CODE
+    // a failed load (e.g. SFX pool exhausted) leaves the slot scoped but bufferless
+    if (!sfxList[sfx].buffer || !sfxList[sfx].length)
+        return -1;
+#endif
 
     uint8 count = 0;
     for (int32 c = 0; c < CHANNEL_COUNT; ++c) {
@@ -533,7 +911,13 @@ uint32 RSDK::GetChannelPos(uint32 channel)
         return channels[channel].bufferPos;
 
     if (channels[channel].state == CHANNEL_STREAM) {
-        if (!vorbisInfo->current_loc_valid || vorbisInfo->current_loc < 0)
+#if RETRO_PLATFORM == RETRO_PSP
+        // music jingles (drowning, invincibility, 1UP...) save the stage track's position here to resume it: with an
+        // ATRAC3 track there is no Vorbis decoder to ask (reading it crashed the game as the drowning countdown began)
+        if (pspAt3Active)
+            return pspAt3NextSample;
+#endif
+        if (!vorbisInfo || !vorbisInfo->current_loc_valid || vorbisInfo->current_loc < 0)
             return 0;
 
         return vorbisInfo->current_loc;
@@ -544,7 +928,17 @@ uint32 RSDK::GetChannelPos(uint32 channel)
 
 double RSDK::GetVideoStreamPos()
 {
-    if (channels[0].state == CHANNEL_STREAM && AudioDevice::audioState && AudioDevice::initializedAudioChannels && vorbisInfo->current_loc_valid) {
+#if RETRO_PLATFORM == RETRO_PSP
+    if (channels[0].state == CHANNEL_STREAM && AudioDevice::audioState && pspAt3Active) {
+        // what is being heard rather than what has been decoded: take off the rest of the decoded frame, and the
+        // mixer's buffers (~1.5 buffers of 1024 samples: the channel's, half used on average, and the one playing) less
+        // the video's own delay to the screen (decoded at the end of the frame, shown at the next vsync), ~1 buffer
+        int32 heard = (int32)pspAt3NextSample - (pspAt3PcmCount - pspAt3PcmPos) / 2 - MIX_BUFFER_SIZE / 2;
+        return heard > 0 ? heard / (double)AUDIO_FREQUENCY : 0.0;
+    }
+#endif
+    if (channels[0].state == CHANNEL_STREAM && AudioDevice::audioState && AudioDevice::initializedAudioChannels && vorbisInfo
+        && vorbisInfo->current_loc_valid) {
         return vorbisInfo->current_loc / (double)AUDIO_FREQUENCY;
     }
 

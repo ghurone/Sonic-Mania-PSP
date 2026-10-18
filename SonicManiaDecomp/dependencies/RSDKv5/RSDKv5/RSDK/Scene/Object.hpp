@@ -213,6 +213,28 @@ extern int32 stageObjectIDs[OBJECT_COUNT];
 
 extern EntityBase objectEntityList[ENTITY_COUNT];
 
+#if RETRO_PLATFORM == RETRO_PSP
+// ProcessObjects' 2nd/3rd passes used to walk all ENTITY_COUNT (~1.1KB each) entities, a cache miss per slot on
+// hardware. Instead they walk this compact per-slot table and only touch flagged entities:
+//   PSP_SLOT_INRANGE : entity was in range this frame (or was copied in-range) -> typeGroups/lateUpdate candidate
+//   PSP_SLOT_ONSCREEN: entity->onScreen may be non-zero and must be cleared
+enum { PSP_SLOT_INRANGE = 1, PSP_SLOT_ONSCREEN = 2 };
+extern uint8 pspSlotFlags[ENTITY_COUNT];
+
+// entities only gain inRange/onScreen through the engine passes, the draw lists, or a whole-entity copy
+inline void PSPMarkEntitySlot(void *entity)
+{
+    if ((uint8 *)entity >= (uint8 *)objectEntityList && (uint8 *)entity < (uint8 *)&objectEntityList[ENTITY_COUNT]) {
+        EntityBase *e = (EntityBase *)entity;
+        int32 slot    = (int32)(e - objectEntityList);
+        if (e->inRange)
+            pspSlotFlags[slot] |= PSP_SLOT_INRANGE;
+        if (e->onScreen)
+            pspSlotFlags[slot] |= PSP_SLOT_ONSCREEN;
+    }
+}
+#endif
+
 extern EditableVarInfo *editableVarList;
 extern int32 editableVarCount;
 
@@ -302,6 +324,9 @@ inline void CopyEntity(void *destEntity, void *srcEntity, bool32 clearSrcEntity)
 {
     if (destEntity && srcEntity) {
         memcpy(destEntity, srcEntity, sizeof(EntityBase));
+#if RETRO_PLATFORM == RETRO_PSP
+        PSPMarkEntitySlot(destEntity);
+#endif
 
         if (clearSrcEntity)
             memset(srcEntity, 0, sizeof(EntityBase));

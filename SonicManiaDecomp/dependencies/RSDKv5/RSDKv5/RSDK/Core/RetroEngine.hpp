@@ -91,6 +91,7 @@ enum GameRegions {
 #define RETRO_iOS     (6)
 #define RETRO_ANDROID (7)
 #define RETRO_UWP     (8)
+#define RETRO_PSP     (9)
 
 // ============================
 // PLATFORMS (used mostly in legacy but could come in handy here)
@@ -136,6 +137,9 @@ enum GameRegions {
 #elif defined __ANDROID__
 #define RETRO_PLATFORM   (RETRO_ANDROID)
 #define RETRO_DEVICETYPE (RETRO_MOBILE)
+#elif defined __PSP__
+#define RETRO_PLATFORM   (RETRO_PSP)
+#define RETRO_DEVICETYPE (RETRO_STANDARD)
 #elif defined __SWITCH__
 #define RETRO_PLATFORM   (RETRO_SWITCH)
 #define RETRO_DEVICETYPE (RETRO_STANDARD)
@@ -148,7 +152,11 @@ enum GameRegions {
 #endif
 
 #ifndef SCREEN_XMAX
+#if RETRO_PLATFORM == RETRO_PSP
+#define SCREEN_XMAX (432)
+#else
 #define SCREEN_XMAX (1280)
+#endif
 #endif
 
 #ifndef SCREEN_YSIZE
@@ -167,6 +175,7 @@ enum GameRegions {
 #define RETRO_RENDERDEVICE_GLFW (0)
 #define RETRO_RENDERDEVICE_VK   (0)
 #define RETRO_RENDERDEVICE_EGL  (0)
+#define RETRO_RENDERDEVICE_PSP  (0)
 
 // ============================
 // AUDIO DEVICE BACKENDS
@@ -177,6 +186,7 @@ enum GameRegions {
 #define RETRO_AUDIODEVICE_SDL2 (0)
 #endif
 #define RETRO_AUDIODEVICE_OBOE (0)
+#define RETRO_AUDIODEVICE_PSP  (0)
 #ifndef RETRO_AUDIODEVICE_PORT
 #define RETRO_AUDIODEVICE_PORT (0)
 #endif
@@ -196,6 +206,7 @@ enum GameRegions {
 #define RETRO_INPUTDEVICE_SDL2   (0)
 #define RETRO_INPUTDEVICE_GLFW   (0)
 #define RETRO_INPUTDEVICE_PDBOAT (0)
+#define RETRO_INPUTDEVICE_PSP    (0)
 
 // ============================
 // USER CORE BACKENDS
@@ -406,6 +417,19 @@ enum GameRegions {
 #error RSDK_USE_OGL must be defined.
 #endif
 
+#elif RETRO_PLATFORM == RETRO_PSP
+
+#undef RETRO_RENDERDEVICE_PSP
+#define RETRO_RENDERDEVICE_PSP (1)
+#undef RETRO_AUDIODEVICE_PSP
+#define RETRO_AUDIODEVICE_PSP (1)
+#undef RETRO_INPUTDEVICE_PSP
+#define RETRO_INPUTDEVICE_PSP (1)
+
+#undef RETRO_INPUTDEVICE_KEYBOARD
+#define RETRO_INPUTDEVICE_KEYBOARD (0)
+#undef RETRO_USING_MOUSE
+
 #elif RETRO_PLATFORM == RETRO_OSX || RETRO_PLATFORM == RETRO_iOS
 
 #undef RETRO_RENDERDEVICE_SDL2
@@ -539,7 +563,131 @@ extern "C" {
 #endif
 #endif
 
+#if RETRO_PLATFORM == RETRO_PSP
+#include <pspkernel.h>
+#include <pspdebug.h>
+#include <pspctrl.h>
+#include <pspdisplay.h>
+#include <pspgu.h>
+#include <pspgum.h>
+#include <pspaudio.h>
+#include <psppower.h>
+#include <psputils.h>
+#include <pspthreadman.h>
+#include <psprtc.h>
+#include "RSDK/Core/PSPStubs.hpp"
+// Memory pools (KB). Measured peaks over every scene (PSP mem lines, 2026-10-07): stages 16.8MB (MSZ Encore), sound
+// effects ~11.4MB (SSZ2), temporary ~1.3MB with the capped scene entity list (Scene.cpp), strings 49KB, music 8KB (the
+// ATRAC3 tracks stream). The RAM for the bigger stage/sfx pools comes from strings/music and the screens' unused arrays.
+#ifndef PSP_STG_KB
+#define PSP_STG_KB (17664)
+#endif
+#ifndef PSP_MUS_KB
+// without ATRAC3 music, MUS holds a whole .ogg (zone tracks ~2MB, largest 3.7MB) + 512KB vorbis scratch
+#define PSP_MUS_KB (5 * 1024)
+#endif
+#ifndef PSP_MUS_STREAM_KB
+#define PSP_MUS_STREAM_KB (128) // with them (Data.psp or Music/)
+#endif
+#ifndef PSP_SFX_KB
+#define PSP_SFX_KB (11776)
+#endif
+#ifndef PSP_STR_KB
+#define PSP_STR_KB (128)
+#endif
+#ifndef PSP_TMP_KB
+#define PSP_TMP_KB (2048)
+#endif
+
+// --- PSP profiler: microsecond accumulators dumped to the log every 120 frames ---
+// AUDLOCK: time the game thread spent blocked on the audio lock (the mixer holds it while decoding music)
+enum { PSPPROF_OBJUPDATE, PSPPROF_DRAW, PSPPROF_COPY, PSPPROF_GUWAIT, PSPPROF_VBLANK, PSPPROF_FRAME, PSPPROF_AUDIO, PSPPROF_AUDLOCK, PSPPROF_MAX };
+extern unsigned long long pspProf[PSPPROF_MAX];
+// waits for the GE to stop reading the engine framebuffers (PSPRenderDevice.cpp); call before drawing into them
+void PSPWaitDisplayList();
+// logs the top classes by update/draw time and the tile layer time since the last call (Object.cpp)
+void PSPReportClassProfile(uint32 frames);
+// 3D faces queued for the GE (PSPRenderDevice.cpp): every CPU draw into the framebuffer must flush them first
+extern bool psp3DPending;
+void PSPFlush3D();
+#define PSP_FLUSH_3D()                                                                                                                         do {                                                                                                                                           if (psp3DPending)                                                                                                                              PSPFlush3D();                                                                                                                      } while (0)
+// a CPU draw confined to [x1,x2)x[y1,y2) only has to wait for queued 3D that it overlaps
+void PSPFlush3DRect(int x1, int y1, int x2, int y2);
+#define PSP_FLUSH_3D_RECT(x1, y1, x2, y2)                                                                                                      do {                                                                                                                                           if (psp3DPending)                                                                                                                              PSPFlush3DRect(x1, y1, x2, y2);                                                                                                    } while (0)
+extern unsigned int psp3DFlushes, psp3DTriangles; // since the last perf report
+extern unsigned int pspGeLayerSprites;
+extern unsigned long long pspGeRotoGenUS, pspGeRotoFlushUS, pspGeClutUS;
+extern unsigned int pspRotoWalkRuns, pspGeClutCount;
+// input recording/replay (PSPInputDevice.cpp)
+enum { PSP_INPUT_RECORD = 1, PSP_INPUT_REPLAY = 2 };
+extern int pspInputMode;
+extern int pspReplayStopAt;
+extern int pspGeModels; // 3D models drawn whole by the GE (boot.txt "nogemodels" turns it off)
+void PSPInputRecordingInit(int mode, const char *name);
+void PSPSaveInputRecording();
+extern int pspLogEveryReport; // write the log to the Memory Stick every perf report (boot.txt "logflush")
+extern int pspFrameSkipMode, pspUpdatesPerDraw, pspFrameUpdates; // frame pacing (PSPRenderDevice.cpp)
+extern unsigned long long pspExtraUpdateUS;
+extern int pspFrameCheck;
+extern int pspMusicTest; // boot.txt "framecheck": verifies what reaches the LCD
+extern int pspGeSyncTest;
+extern int pspGeSprites; // sprites drawn by the GE (boot.txt "nogesprites" turns it off)
+extern unsigned int pspGeSpriteCount, pspSpriteCacheCopies, pspSpriteCacheResets;
+extern int pspRotoSegment, pspRotoCheck, pspRotoStrips, pspRotoGeRun, pspEmuGeLayers, pspGeOverlap, pspRotoIndexRun;
+extern unsigned int pspRotoIndexRows;
+void PSPKick3DIfIdle(); // between objects' draws (PSPRenderDevice.cpp)
+void PSPRotoFreeMaps(); // the rotozoom cell map, on scene loads (PSPRenderDevice.cpp)
+extern int pspGeKickKB;
+extern unsigned int pspGeIdleKicks, pspGeBusySkips; // rotozoom layers drawn from a whole-layer texture: pixels per line; self-check
+extern int pspGeLayers; // tile layers drawn by the GE (boot.txt "nogelayers" turns it off)
+// keeps the GE's copy of the tileset in step with tilesetPixels (PSPRenderDevice.cpp)
+void PSPUpdateTileAtlas(int tile, int count);
+extern unsigned long long psp3DFlushUS;
+extern unsigned long long psp3DFlushParts[4];
+extern unsigned int psp3DCopiedPixels;
+// writes buffered log lines to the Memory Stick and enables log buffering (Debug.cpp)
+void PSPFlushLog();
+// writes achievements saved since the last call (UserCore.cpp)
+void PSPFlushUserData();
+static inline unsigned long long PSPProfNow()
+{
+    unsigned long long t;
+    sceRtcGetCurrentTick(&t);
+    return t;
+}
+// Per object / per 3D scene / per item timers: each clock read is a ~1us system call, a millisecond or more a frame in
+// busy scenes, so they only run with boot.txt "prof" (they read 0 otherwise).
+extern int pspProfDetail;
+static inline unsigned long long PSPProfFine()
+{
+    if (!pspProfDetail)
+        return 0;
+    unsigned long long t;
+    sceRtcGetCurrentTick(&t);
+    return t;
+}
+#define PSP_PROF_BEGIN(id) unsigned long long _pspProfT##id = PSPProfNow()
+#define PSP_PROF_END(id)   pspProf[id] += PSPProfNow() - _pspProfT##id
+
+// --- scene load profile: time per asset kind during one scene load, logged with "PSP load" (RetroEngine.cpp) ---
+// ANIM includes the sheets it loads; STATIC is the per-class static variable lookup; DEFRAG is pool compaction (any phase)
+enum { PSPLOAD_SHEET, PSPLOAD_ANIM, PSPLOAD_SFX, PSPLOAD_MESH, PSPLOAD_STATIC, PSPLOAD_DEFRAG, PSPLOAD_MAX };
+extern unsigned long long pspLoadProf[PSPLOAD_MAX];
+extern unsigned long long pspLoadIO[PSPLOAD_MAX], pspLoadDecryptUS, pspLoadGifUS; // scene load: Memory Stick time per category, decrypting, GIF decoding
+unsigned long long PSPPackIoUS();
+struct PSPLoadTimer {
+    int id;
+    unsigned long long start, io;
+    PSPLoadTimer(int id) : id(id), start(PSPProfNow()), io(PSPPackIoUS()) {}
+    ~PSPLoadTimer()
+    {
+        pspLoadProf[id] += PSPProfNow() - start;
+        pspLoadIO[id] += PSPPackIoUS() - io;
+    }
+};
+#else
 #include <theora/theoradec.h>
+#endif
 
 // ============================
 // ENGINE INCLUDES

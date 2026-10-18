@@ -33,7 +33,14 @@ extern uint16 *tintLookupTable;
 extern uint16 tintLookupTable[0x10000];
 #endif
 
+// PSP: the engine draws straight into the GE's 5650 texture format, which is BGR565 (red in the low bits),
+// so the presenter can sample the framebuffer without a per-frame conversion pass. Every place that packs
+// or unpacks a 16-bit colour swaps the R/B lanes on PSP; blending treats both 5-bit lanes alike.
+#if RETRO_PLATFORM == RETRO_PSP
+#define RGB888_TO_RGB565(r, g, b) ((r) >> 3) | (((g) >> 2) << 5) | (((b) >> 3) << 11)
+#else
 #define RGB888_TO_RGB565(r, g, b) ((b) >> 3) | (((g) >> 2) << 5) | (((r) >> 3) << 11)
+#endif
 
 #define PACK_RGB888(r, g, b) RGB888_TO_RGB565(r, g, b)
 
@@ -54,9 +61,15 @@ inline uint32 GetPaletteEntry(uint8 bankID, uint8 index)
     // 0x1F   = 0000 0000 0001 1111 = B
     uint16 clr = fullPalette[bankID & 7][index];
 
+#if RETRO_PLATFORM == RETRO_PSP
+    int32 R = (clr & 0x1F) << 19;
+    int32 G = (clr & 0x7E0) << 5;
+    int32 B = (clr & 0xF800) >> 8;
+#else
     int32 R = (clr & 0xF800) << 8;
     int32 G = (clr & 0x7E0) << 5;
     int32 B = (clr & 0x1F) << 3;
+#endif
     return R | G | B;
 }
 

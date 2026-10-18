@@ -80,6 +80,8 @@ void LoadSfx(char *filePath, uint8 plays, uint8 scope);
 #include "SDL2/SDL2AudioDevice.hpp"
 #elif RETRO_AUDIODEVICE_OBOE
 #include "Oboe/OboeAudioDevice.hpp"
+#elif RETRO_AUDIODEVICE_PSP
+#include "PSP/PSPAudioDevice.hpp"
 #endif
 
 namespace RSDK

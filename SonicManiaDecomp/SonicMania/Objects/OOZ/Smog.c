@@ -9,9 +9,17 @@
 
 ObjectSmog *Smog;
 
+#if defined(__psp__)
+extern int pspSmogTest; // main.cpp, boot.txt "smogtest"
+#endif
+
 void Smog_Update(void)
 {
     RSDK_THIS(Smog);
+#if defined(__psp__)
+    if (pspSmogTest)
+        Smog->forceEnabled = true;
+#endif
 
     if (Smog->forceEnabled) {
         OOZSetup->smogTimer = 0;

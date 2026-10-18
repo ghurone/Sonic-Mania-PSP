@@ -21,8 +21,17 @@ void WarpDoor_Update(void)
         if (tag) {
             bool32 warped = false;
             int32 boundID = -1;
+#if defined(__psp__)
+            // foreach_all walks all 2368 entity slots (a cache miss each on the PSP) for every door, every frame: 6-15ms a
+            // frame in OOZ2/TMZ2. Players only ever live in the player slots, which is all it can find.
+            for (int32 p = 0; p < Player->playerCount; ++p) {
+                EntityPlayer *player = RSDK_GET_ENTITY(p, Player);
+                if (player->classID != Player->classID)
+                    continue;
+#else
             foreach_all(Player, player)
             {
+#endif
                 if (Player_CheckCollisionTouch(player, self, &self->hitbox)) {
                     warped = true;
 
@@ -117,7 +126,11 @@ void WarpDoor_Update(void)
                                 if (self->effect == OOZ_WARPDOOR_EFFECT_TO_SUB || self->effect == OOZ_WARPDOOR_EFFECT_FROM_SUB) {
                                     OOZSetup->useSmogEffect = self->effect == OOZ_WARPDOOR_EFFECT_FROM_SUB ? 1 : 0;
                                     destroyEntity(self);
+#if defined(__psp__)
+                                    return;
+#else
                                     foreach_return;
+#endif
                                 }
                             }
                             else if (RSDK.CheckSceneFolder("FBZ")) {

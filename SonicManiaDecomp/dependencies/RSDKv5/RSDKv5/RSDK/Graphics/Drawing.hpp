@@ -73,9 +73,15 @@ struct GFXSurface {
     uint8 scope;
 };
 
-struct ScreenInfo {
+struct alignas(64) ScreenInfo {
+#if RETRO_PLATFORM == RETRO_PSP
+    // The frame lives in VRAM (cached CPU access is as fast as RAM), where the GE can draw into it directly too: only
+    // a pointer here (the game's RSDKScreenInfo in GameLink.h matches this layout on PSP), saving 4 x 207KB of RAM.
+    uint16 *frameBuffer;
+#else
     // uint16 *frameBuffer;
     uint16 frameBuffer[SCREEN_XMAX * SCREEN_YSIZE];
+#endif
     Vector2 position;
     Vector2 size;
     Vector2 center;
@@ -254,6 +260,8 @@ private:
 #include "Vulkan/VulkanRenderDevice.hpp"
 #elif RETRO_RENDERDEVICE_EGL
 #include "EGL/EGLRenderDevice.hpp"
+#elif RETRO_RENDERDEVICE_PSP
+#include "PSP/PSPRenderDevice.hpp"
 #endif
 
 extern DrawList drawGroups[DRAWGROUP_COUNT];
@@ -381,6 +389,58 @@ void DrawCircleOutline(int32 x, int32 y, int32 innerRadius, int32 outerRadius, u
 
 void DrawFace(Vector2 *vertices, int32 vertCount, int32 r, int32 g, int32 b, int32 alpha, int32 inkEffect);
 void DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, int32 alpha, int32 inkEffect);
+#if RETRO_PLATFORM == RETRO_PSP
+// 3D on the GE (PSPRenderDevice.cpp)
+struct Matrix;
+struct PSPGe3DModelVertex {
+    uint32 color; // ABGR
+    float x, y, z;
+};
+PSPGe3DModelVertex *PSPGe3DUncached(PSPGe3DModelVertex *verts);
+// the ink the GE draws with (adjusting alpha like DrawFace); -1: software only, -2: nothing to draw
+int32 PSPGe3DInk(int32 inkEffect, int32 *alpha);
+// queues a screen-space face; false: draw it in software
+bool32 PSPQueue3DFace(Vector2 *vertices, uint32 *colors, uint32 flatColor, int32 vertCount, int32 alpha, int32 inkEffect);
+// a whole model: fill the returned vertices (lit, untransformed), then give its triangle indices, world*view matrix,
+// projection shifts and on-screen bounds. NULL: draw it in software.
+// scene: one id per Draw3DScene call; each gets its own slice of the depth buffer, later ones in front (the software
+// renderer's draw order between scenes), zNear..zFar its own depth span
+PSPGe3DModelVertex *PSPBegin3DModel(int32 vertCount, int32 inkEffect, uint32 scene);
+// vertices queued earlier in the same batch (PSPGe3DBatch unchanged, at PSPGe3DOffset of what Begin returned) drawn
+// again for another model instance, instead of PSPBegin3DModel; then PSPEnd3DModel as usual. false: queue them anew
+uint32 PSPGe3DBatch();
+uint32 PSPGe3DOffset(const void *data);
+bool32 PSPReuse3DModel(uint32 batch, uint32 offset, int32 inkEffect, uint32 scene);
+struct TileLayer;
+// draws an HScroll layer with the GE; false: draw it in software
+bool32 PSPQueueLayerHScroll(TileLayer *layer);
+bool32 PSPQueueLayerVScroll(TileLayer *layer);
+bool32 PSPQueueLayerBasic(TileLayer *layer);
+bool32 PSPQueueLayerRotozoom(TileLayer *layer);
+// sprites drawn by the GE (see PSPRenderDevice.cpp); false: draw them in software
+bool32 PSPQueueSpriteRect(int32 x, int32 y, int32 width, int32 height, int32 sprX, int32 sprY, int32 direction, int32 inkEffect, int32 alpha,
+                          int32 sheetID);
+// DrawDeformedSprite with the GE: returns the first scanline still to draw in software (clipBound_Y2 when all queued)
+int32 PSPQueueDeformedSprite(uint16 sheetID, int32 inkEffect, int32 alpha);
+// INK_TINT shapes on the GE when the tint table inverts every colour: spans of screen rows, inverted by a logic op
+bool32 PSPTintIsInverse();
+bool32 PSPInvertBegin(int32 maxSpans); // false: draw it in software
+bool32 PSPQueueMaskedRect(int32 x1, int32 y1, int32 x2, int32 y2, uint32 color); // INK_MASKED rectangles on the GE
+void PSPInvertSpan(int32 y, int32 x1, int32 x2, int32 rows = 1);
+void PSPInvertEnd();
+// FillScreen on the GE (false: draw it in software)
+bool32 PSPQueueFillScreen(uint32 color, int32 alphaR, int32 alphaG, int32 alphaB);
+// DrawSpriteRotozoom without rotation (texX, texY: the sheet position at the sprite's origin, in texels)
+bool32 PSPQueueSpriteScaled(int32 x, int32 y, int32 texX, int32 texY, int32 sprX, int32 sprY, int32 width, int32 height, int32 scaleX, int32 scaleY,
+                            int32 direction, int32 inkEffect, int32 alpha, int32 sheetID);
+bool32 PSPQueueSpriteAffine(int32 x, int32 y, int32 texX, int32 texY, int32 deltaX, int32 deltaY, int32 deltaXLen, int32 deltaYLen,
+                            int32 sprX, int32 sprY, int32 width, int32 height, int32 inkEffect, int32 alpha, int32 sheetID);
+void PSPEnd3DModel(const uint16 *indices, int32 indexCount, const Matrix *matWorld, int32 projectionX, int32 projectionY, int32 x1, int32 y1,
+                   int32 x2, int32 y2, int32 cull, float zNear, float zFar);
+// the same for the non-SCREEN draw modes: no perspective, a vertex lands at (x / 256, y / 256) minus the screen position
+void PSPEnd3DModelOrtho(const uint16 *indices, int32 indexCount, const Matrix *matWorld, int32 x1, int32 y1, int32 x2, int32 y2, float zNear,
+                        float zFar);
+#endif
 
 void DrawSprite(Animator *animator, Vector2 *position, bool32 screenRelative);
 void DrawSpriteFlipped(int32 x, int32 y, int32 width, int32 height, int32 sprX, int32 sprY, int32 direction, int32 inkEffect, int32 alpha,

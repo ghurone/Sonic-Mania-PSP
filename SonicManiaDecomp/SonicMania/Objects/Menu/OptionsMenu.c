@@ -20,7 +20,54 @@ void OptionsMenu_Draw(void) {}
 
 void OptionsMenu_Create(void *data) {}
 
-void OptionsMenu_StageLoad(void) {}
+#if defined(__psp__)
+// Portuguese (LANGUAGE_PT, the PSP port's): a tenth button on the language menu. It is Traditional Chinese's, copied into
+// the empty half of the last row (Chinese moving to the other half); its name, PORTUGUÊS, is drawn from UI/TextPT
+// (tools/psp_portuguese.py) whatever the language, as each set has its languages' names but not this one.
+static EntityUIButton *pspPortugueseButton;
+static uint16 pspPortugueseFrames = (uint16)-1;
+
+static void OptionsMenu_SetupPortugueseButton(void)
+{
+    EntityUIControl *control = OptionsMenu->languageControl;
+    pspPortugueseButton      = NULL;
+    if (!control || pspPortugueseFrames == (uint16)-1 || control->buttonCount != LANGUAGE_PT || !control->buttons[LANGUAGE_TC]
+        || !control->buttons[LANGUAGE_KO] || !control->buttons[LANGUAGE_SC])
+        return;
+
+    EntityUIButton *chinese = control->buttons[LANGUAGE_TC];
+    EntityUIButton *button  = CREATE_ENTITY(UIButton, NULL, chinese->position.x, chinese->position.y);
+    RSDK.CopyEntity(button, chinese, false);
+    button->isPermanent = true; // (a created entity: keep later ones from taking its slot)
+    button->position.x  = control->buttons[LANGUAGE_SC]->position.x;
+    chinese->position.x = control->buttons[LANGUAGE_KO]->position.x;
+
+    control->buttons[LANGUAGE_PT] = button;
+    control->buttonCount++;
+    pspPortugueseButton = button;
+}
+
+// UIButton_Draw: the Portuguese button's name; false for any other button
+bool32 OptionsMenu_DrawPortugueseLabel(EntityUIButton *button, Vector2 *drawPos)
+{
+    if (!pspPortugueseButton || button != pspPortugueseButton)
+        return false;
+
+    Animator label;
+    memset(&label, 0, sizeof(label));
+    RSDK.SetSpriteAnimation(pspPortugueseFrames, 15, &label, true, 9);
+    RSDK.DrawSprite(&label, drawPos, false);
+    return true;
+}
+#endif
+
+void OptionsMenu_StageLoad(void)
+{
+#if defined(__psp__)
+    pspPortugueseButton = NULL;
+    pspPortugueseFrames = RSDK.LoadSpriteAnimation("UI/TextPT.bin", SCOPE_STAGE);
+#endif
+}
 
 void OptionsMenu_Initialize(void)
 {
@@ -232,6 +279,12 @@ void OptionsMenu_SetupActions(void)
         EntityUIButtonPrompt *prompt = OptionsMenu->helpPrompt;
         prompt->visible              = false;
     }
+
+#if defined(__psp__)
+    OptionsMenu_SetupPortugueseButton();
+    if (pspPortugueseButton)
+        pspPortugueseButton->actionCB = OptionsMenu_LanguageButton_ActionCB;
+#endif
 }
 
 void OptionsMenu_HandleMenuReturn(void)

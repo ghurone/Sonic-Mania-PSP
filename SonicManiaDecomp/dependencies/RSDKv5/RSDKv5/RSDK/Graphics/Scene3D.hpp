@@ -74,6 +74,14 @@ struct Model {
     uint8 flags;
     uint8 faceVertCount;
     uint8 scope;
+#if RETRO_PLATFORM == RETRO_PSP
+    int8 pspCull; // closed & consistently wound: sign of its volume (faces facing away can never show), else 0
+    uint8 pspGeReady;                       // triangles with valid indices: the GE can draw it whole
+    float pspBoundsMin[3], pspBoundsMax[3]; // over every frame, for its on-screen rectangle
+    // its lit vertices last queued for the GE (PSPDrawModelRecord), reused by the next instance lit the same way
+    uint32 pspLitBatch, pspLitOffset;
+    int32 pspLitKey[18];
+#endif
 };
 
 struct Scene3DVertex {
@@ -102,6 +110,9 @@ struct Scene3D {
     Scene3DVertex *normals;
     Scene3DFace *faceBuffer;
     uint8 *faceVertCounts;
+#if RETRO_PLATFORM == RETRO_PSP
+    int8 *pspFaceCull; // per face: which screen winding is the back side (0 = always draw), see PSPSetFaceCull
+#endif
 
     int32 projectionX;
     int32 projectionY;
@@ -129,6 +140,15 @@ extern Model modelList[MODEL_COUNT];
 extern Scene3D scene3DList[SCENE3D_COUNT];
 
 extern ScanEdge scanEdgeBuffer[SCREEN_YSIZE * 2];
+#if RETRO_PLATFORM == RETRO_PSP
+extern uint32 pspFacesDrawn;  // 3D faces rasterized since the last perf report
+extern uint32 pspFacesCulled; // 3D faces skipped as back faces of closed meshes
+extern unsigned long long pspS3DTime[3]; // us since the last perf report: adding models, depth sort, drawing faces
+extern unsigned long long pspS3DDetail[3]; // diagnostics: model records total, their vertex lighting, the End (GE queue) part
+extern uint32 pspS3DCalls, pspS3DVerts, pspS3DModels, pspS3DReused;
+void PSPReportLitModels(uint32 frames);
+extern uint32 pspS3DPixels;              // pixels written by 3D faces since the last perf report
+#endif
 
 void ProcessScanEdge(int32 x1, int32 y1, int32 x2, int32 y2);
 void ProcessScanEdgeClr(uint32 c1, uint32 c2, int32 x1, int32 y1, int32 x2, int32 y2);
@@ -146,11 +166,31 @@ inline void MatrixCopy(Matrix *matDst, Matrix *matSrc) { memcpy(matDst, matSrc, 
 
 uint16 LoadMesh(const char *filepath, uint8 scope);
 uint16 Create3DScene(const char *name, uint16 faceCnt, uint8 scope);
+#if RETRO_PLATFORM == RETRO_PSP
+void PSPDropModelRecords(uint16 sceneID); // models added to the scene for the GE (Scene3D.cpp)
+#endif
+
 inline void Prepare3DScene(uint16 sceneID)
 {
     if (sceneID < SCENE3D_COUNT) {
         Scene3D *scn = &scene3DList[sceneID];
+#if RETRO_PLATFORM == RETRO_PSP
+        PSPDropModelRecords(sceneID);
+#endif
 
+#if RETRO_PLATFORM == RETRO_PSP
+        // Only what was added since the last Prepare can be nonzero (the buffers start cleared). Clearing all of vertLimit
+        // is ~330KB of memset for the usual 4096 vertices, about 1ms on hardware, and the special stages prepare a scene
+        // per object per frame (every shadow, decoration...). faceBuffer is fully rewritten by Draw3DScene before use.
+        int32 usedVerts = MIN(scn->vertexCount, scn->vertLimit);
+        int32 usedFaces = MIN(scn->faceCount, scn->vertLimit);
+        memset(scn->vertices, 0, sizeof(Scene3DVertex) * usedVerts);
+        memset(scn->normals, 0, sizeof(Scene3DVertex) * usedVerts);
+        memset(scn->faceVertCounts, 0, sizeof(uint8) * usedFaces);
+
+        scn->vertexCount = 0;
+        scn->faceCount   = 0;
+#else
         scn->vertexCount = 0;
         scn->faceCount   = 0;
 
@@ -158,6 +198,7 @@ inline void Prepare3DScene(uint16 sceneID)
         memset(scn->normals, 0, sizeof(Scene3DVertex) * scn->vertLimit);
         memset(scn->faceVertCounts, 0, sizeof(uint8) * scn->vertLimit);
         memset(scn->faceBuffer, 0, sizeof(Scene3DFace) * scn->vertLimit);
+#endif
     }
 }
 

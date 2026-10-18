@@ -48,6 +48,10 @@ int32 RSDK::gamePadCount               = 0;
 #include "GLFW/GLFWInputDevice.cpp"
 #endif
 
+#if RETRO_INPUTDEVICE_PSP
+#include "PSP/PSPInputDevice.cpp"
+#endif
+
 #if RETRO_INPUTDEVICE_PDBOAT
 #include "Paddleboat/PDBInputDevice.cpp"
 #endif
@@ -126,6 +130,10 @@ void RSDK::InitInputDevices()
 
 #if RETRO_INPUTDEVICE_GLFW
     SKU::InitGLFWInputAPI();
+#endif
+
+#if RETRO_INPUTDEVICE_PSP
+    SKU::InitPSPInputAPI();
 #endif
 
 #if RETRO_INPUTDEVICE_PDBOAT

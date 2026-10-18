@@ -27,7 +27,12 @@ void ColorHelpers_Create(void *data) {}
 
 void ColorHelpers_StageLoad(void) {}
 
+#if defined(__PSP__)
+// the PSP engine build draws in BGR565 (the GE's native 5650 format), see RGB888_TO_RGB565 in the engine
+uint16 ColorHelpers_PackRGB(uint8 r, uint8 g, uint8 b) { return (r >> 3) | ((g >> 2) << 5) | ((b >> 3) << 11); }
+#else
 uint16 ColorHelpers_PackRGB(uint8 r, uint8 g, uint8 b) { return (b >> 3) | ((g >> 2) << 5) | ((r >> 3) << 11); }
+#endif
 
 void ColorHelpers_RGBToHSL(uint32 r, uint32 g, uint32 b, uint32 *hue, uint32 *saturation, uint32 *luminance)
 {

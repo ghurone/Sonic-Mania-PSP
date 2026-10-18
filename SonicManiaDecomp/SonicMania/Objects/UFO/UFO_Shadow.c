@@ -7,6 +7,15 @@
 
 #include "Game.h"
 
+#if defined(__psp__)
+// The frame's shadows a few to a 3D scene instead of one each: they are the same model, colour and blend (so the order
+// they overlap in changes nothing), drawn one after another (the temp slots at the end of drawGroup 3). Counted in
+// LateUpdate; in Draw the first of a group prepares the scene, every one adds its model, the last draws it. (Not all
+// in one: where the GE is what holds the frame back, it then got them all late, at the very end - UFO7.)
+static int32 pspShadowCount, pspShadowDrawn;
+extern int pspShadowChunk; // boot.txt shadowchunk=N
+#endif
+
 ObjectUFO_Shadow *UFO_Shadow;
 
 void UFO_Shadow_Update(void) {}
@@ -38,26 +47,59 @@ void UFO_Shadow_LateUpdate(void)
                     < 0x100;
             }
         }
+#if defined(__psp__)
+        if (self->visible && self->zdepth >= 0x4000)
+            pspShadowCount++;
+#endif
     }
     else {
         destroyEntity(self);
     }
 }
 
-void UFO_Shadow_StaticUpdate(void) {}
+void UFO_Shadow_StaticUpdate(void)
+{
+#if defined(__psp__)
+    if (pspShadowDrawn && pspShadowDrawn != pspShadowCount)
+        LogHelpers_Print("UFO_Shadow: %d of %d shadows drawn", pspShadowDrawn, pspShadowCount);
+    pspShadowCount = pspShadowDrawn = 0;
+#endif
+}
 
+#if defined(__psp__)
+extern int pspSkipShadows; // boot.txt "noshadows" (measuring only)
+extern int pspShadowBatchOff; // boot.txt "noshadowbatch" (comparing only)
+#endif
 void UFO_Shadow_Draw(void)
 {
     RSDK_THIS(UFO_Shadow);
+#if defined(__psp__)
+    if (pspSkipShadows)
+        return;
+#endif
 
     if (self->zdepth >= 0x4000) {
         RSDK.MatrixScaleXYZ(&self->matrix, self->shadowScale, 0x100, self->shadowScale);
         RSDK.MatrixTranslateXYZ(&self->matrix, self->position.x, 0, self->position.y, 0);
         RSDK.MatrixMultiply(&self->matrix, &self->matrix, &UFO_Camera->matWorld);
 
+#if defined(__psp__)
+        if (pspShadowBatchOff) {
+            RSDK.Prepare3DScene(UFO_Shadow->sceneID);
+            RSDK.AddModelTo3DScene(UFO_Shadow->modelIndex, UFO_Shadow->sceneID, S3D_SOLIDCOLOR_SCREEN, &self->matrix, 0, 0);
+            RSDK.Draw3DScene(UFO_Shadow->sceneID);
+            return;
+        }
+        if (!(pspShadowDrawn % pspShadowChunk))
+            RSDK.Prepare3DScene(UFO_Shadow->sceneID);
+        RSDK.AddModelTo3DScene(UFO_Shadow->modelIndex, UFO_Shadow->sceneID, S3D_SOLIDCOLOR_SCREEN, &self->matrix, 0, 0);
+        if (++pspShadowDrawn >= pspShadowCount || !(pspShadowDrawn % pspShadowChunk))
+            RSDK.Draw3DScene(UFO_Shadow->sceneID);
+#else
         RSDK.Prepare3DScene(UFO_Shadow->sceneID);
         RSDK.AddModelTo3DScene(UFO_Shadow->modelIndex, UFO_Shadow->sceneID, S3D_SOLIDCOLOR_SCREEN, &self->matrix, 0, 0);
         RSDK.Draw3DScene(UFO_Shadow->sceneID);
+#endif
     }
 }
 
@@ -79,6 +121,9 @@ void UFO_Shadow_Create(void *data)
 void UFO_Shadow_StageLoad(void)
 {
     UFO_Shadow->modelIndex = RSDK.LoadMesh("Special/Shadow.bin", SCOPE_STAGE);
+#if defined(__psp__)
+    UFO_Shadow->active = ACTIVE_ALWAYS; // (its StaticUpdate starts each frame's count)
+#endif
     UFO_Shadow->sceneID    = RSDK.Create3DScene("View:Special", 4096, SCOPE_STAGE);
 
     int32 slot = TEMPENTITY_START;

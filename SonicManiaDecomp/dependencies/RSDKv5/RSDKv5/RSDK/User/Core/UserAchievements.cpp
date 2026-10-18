@@ -209,4 +209,17 @@ void RSDK::RegisterAchievement(const char *identifier, const char *name, const c
     achievementList.push_back(info);
 }
 
+#if RETRO_PLATFORM == RETRO_PSP
+// For the main menu's achievements panel (MainMenu.c), the PSP having no system overlay to list them: the name and
+// description of achievement id; returns whether it is unlocked, or -1 past the last one
+extern "C" int32 PSPGetAchievement(int32 id, const char **name, const char **description)
+{
+    if (id < 0 || id >= (int32)RSDK::achievementList.size())
+        return -1;
+    *name        = RSDK::achievementList[id].name.c_str();
+    *description = RSDK::achievementList[id].description.c_str();
+    return RSDK::achievementList[id].achieved ? 1 : 0;
+}
+#endif
+
 // End custom achievement code

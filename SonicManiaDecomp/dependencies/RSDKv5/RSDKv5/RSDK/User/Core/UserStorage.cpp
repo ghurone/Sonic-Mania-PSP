@@ -348,7 +348,7 @@ bool32 RSDK::SKU::UserDB::Load(uint8 *buffer)
     }
 
     for (int32 r = 0; r < rowCount; ++r) {
-        rows[r].uuid = *(uint32 *)buffer;
+        memcpy(&rows[r].uuid, buffer, sizeof(uint32)); // after the variable-size values: unaligned (the PSP traps on that)
         buffer += sizeof(uint32);
 
         memcpy(&rows[r].createTime, buffer, sizeof(tm));
@@ -411,7 +411,7 @@ void RSDK::SKU::UserDB::Save(int32 totalSize, uint8 *buffer)
     for (int32 r = 0; r < rowCount; ++r) {
         if (size + sizeof(uint32) < totalSize) {
             size += sizeof(uint32);
-            *(uint32 *)buffer = rows[r].uuid;
+            memcpy(buffer, &rows[r].uuid, sizeof(uint32)); // unaligned, see Load
             buffer += sizeof(uint32);
         }
         if (size + sizeof(tm) < totalSize) {

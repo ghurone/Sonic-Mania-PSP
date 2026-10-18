@@ -89,7 +89,14 @@ void UIButton_Draw(void)
         if (self->disabled && self->align == UIBUTTON_ALIGN_LEFT)
             drawPos.x += 0x150000;
 
-        RSDK.DrawSprite(&self->animator, &drawPos, false);
+#if defined(__psp__) && MANIA_USE_PLUS
+        if (OptionsMenu && OptionsMenu_DrawPortugueseLabel(self, &drawPos)) {
+        }
+        else if (MainMenu && self == MainMenu->achievementsButton)
+            MainMenu_DrawAchievementsLabel(self, &drawPos);
+        else
+#endif
+            RSDK.DrawSprite(&self->animator, &drawPos, false);
     }
 }
 

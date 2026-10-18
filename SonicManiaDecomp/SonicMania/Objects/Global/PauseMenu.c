@@ -9,6 +9,11 @@
 
 ObjectPauseMenu *PauseMenu;
 
+#if defined(__PSP__)
+// engine side (RSDK/Scene/Object.cpp): while frozen, the draw groups below this one are drawn once and then reused
+extern int32 pspFreezeDrawGroup;
+#endif
+
 void PauseMenu_Update(void)
 {
     RSDK_THIS(PauseMenu);
@@ -107,6 +112,12 @@ void PauseMenu_StaticUpdate(void)
 void PauseMenu_Draw(void)
 {
     RSDK_THIS(PauseMenu);
+
+#if defined(__PSP__)
+    // the stage is frozen under the menu: let the engine reuse its image instead of redrawing it every frame
+    if (SceneInfo->state == ENGINESTATE_FROZEN)
+        pspFreezeDrawGroup = self->drawGroup;
+#endif
 
     if (self->paused)
         RSDK.FillScreen(0x000000, self->fadeTimer, self->fadeTimer - 128, self->fadeTimer - 256);

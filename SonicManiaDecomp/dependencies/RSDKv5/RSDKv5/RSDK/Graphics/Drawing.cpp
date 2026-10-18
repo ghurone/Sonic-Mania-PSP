@@ -2,6 +2,13 @@
 
 using namespace RSDK;
 
+// Packs the 3D rasterizer's 8.16 fixed-point colour channels into the platform's 16-bit layout (BGR565 on PSP).
+#if RETRO_PLATFORM == RETRO_PSP
+#define PACK_SHADE565(r, g, b) (((r) >> 19) + (((g) >> 13) & 0x7E0) + (((b) >> 8) & 0xF800))
+#else
+#define PACK_SHADE565(r, g, b) (((b) >> 19) + (((g) >> 13) & 0x7E0) + (((r) >> 8) & 0xF800))
+#endif
+
 #if RETRO_REV0U
 #include "Legacy/DrawingLegacy.cpp"
 #endif
@@ -141,6 +148,8 @@ const RenderVertex rsdkVertexBuffer[24] =
 #include "Vulkan/VulkanRenderDevice.cpp"
 #elif RETRO_RENDERDEVICE_EGL
 #include "EGL/EGLRenderDevice.cpp"
+#elif RETRO_RENDERDEVICE_PSP
+#include "PSP/PSPRenderDevice.cpp"
 #endif
 
 RenderDevice::WindowInfo RenderDevice::displayInfo;
@@ -271,9 +280,16 @@ void RSDK::GenerateBlendLookupTable()
 #endif
 
     for (int32 c = 0; c < 0x100; ++c) {
+#if RETRO_PLATFORM == RETRO_PSP
+        // BGR565 (see RGB888_TO_RGB565): every "B | G | R" table composition yields the GE's native 5650 format
+        rgb32To16_R[c] = c >> 3;
+        rgb32To16_G[c] = (c & 0xFFFC) << 3;
+        rgb32To16_B[c] = (c & 0xFFF8) << 8;
+#else
         rgb32To16_R[c] = (c & 0xFFF8) << 8;
         rgb32To16_G[c] = (c & 0xFFFC) << 3;
         rgb32To16_B[c] = c >> 3;
+#endif
     }
 }
 
@@ -383,7 +399,11 @@ void RSDK::SetScreenSize(uint8 screenID, uint16 width, uint16 height)
 
         screen->size.x   = width;
         screen->size.y   = height & 0xFFF0;
+#if RETRO_PLATFORM == RETRO_PSP
+        screen->pitch = (screen->size.x + 63) & 0xFFFFFFC0; // the GE needs render target widths in multiples of 64
+#else
         screen->pitch    = (screen->size.x + 15) & 0xFFFFFFF0;
+#endif
         screen->center.x = screen->size.x >> 1;
         screen->center.y = screen->size.y >> 1;
 
@@ -591,13 +611,46 @@ void RSDK::FillScreen(uint32 color, int32 alphaR, int32 alphaG, int32 alphaB)
 
     if (alphaR + alphaG + alphaB) {
         validDraw        = true;
-        uint16 clrBlendR = blendLookupTable[0x20 * alphaR + rgb32To16_B[(color >> 0x10) & 0xFF]];
-        uint16 clrBlendG = blendLookupTable[0x20 * alphaG + rgb32To16_B[(color >> 0x08) & 0xFF]];
-        uint16 clrBlendB = blendLookupTable[0x20 * alphaB + rgb32To16_B[(color >> 0x00) & 0xFF]];
+#if RETRO_PLATFORM == RETRO_PSP
+        if (PSPQueueFillScreen(color, alphaR, alphaG, alphaB))
+            return;
+        PSP_FLUSH_3D();
+#endif
+        // ">> 3" is the 5-bit channel value (what rgb32To16_B held before PSP's BGR565 table swap)
+        uint16 clrBlendR = blendLookupTable[0x20 * alphaR + (((color >> 0x10) & 0xFF) >> 3)];
+        uint16 clrBlendG = blendLookupTable[0x20 * alphaG + (((color >> 0x08) & 0xFF) >> 3)];
+        uint16 clrBlendB = blendLookupTable[0x20 * alphaB + (((color >> 0x00) & 0xFF) >> 3)];
 
         uint16 *fbBlendR = &blendLookupTable[0x20 * (0xFF - alphaR)];
         uint16 *fbBlendG = &blendLookupTable[0x20 * (0xFF - alphaG)];
         uint16 *fbBlendB = &blendLookupTable[0x20 * (0xFF - alphaB)];
+
+#if RETRO_PLATFORM == RETRO_PSP
+        // BGR565: the high lane below is blue and the low lane red
+        uint16 clrSwap   = clrBlendR;
+        clrBlendR        = clrBlendB;
+        clrBlendB        = clrSwap;
+        uint16 *fbSwap   = fbBlendR;
+        fbBlendR         = fbBlendB;
+        fbBlendB         = fbSwap;
+
+        // Fully opaque fills (the menu background clears the screen this way every frame) contribute nothing from
+        // the framebuffer (fbBlend* rows are all zero), so every pixel gets the same value: compute it once and
+        // store two pixels per write instead of blending 100K pixels one by one.
+        if (alphaR == 0xFF && alphaG == 0xFF && alphaB == 0xFF) {
+            uint16 fill  = (clrBlendB) | (clrBlendG << 6) | (clrBlendR << 11);
+            uint32 fill2 = fill | ((uint32)fill << 16);
+            int32 cnt    = currentScreen->size.y * currentScreen->pitch; // pitch is a multiple of 16, frameBuffer 64-byte aligned
+            uint32 *dst  = (uint32 *)currentScreen->frameBuffer;
+            for (int32 i = 0; i < (cnt >> 1); i += 4) {
+                dst[i + 0] = fill2;
+                dst[i + 1] = fill2;
+                dst[i + 2] = fill2;
+                dst[i + 3] = fill2;
+            }
+            return;
+        }
+#endif
 
         int32 cnt = currentScreen->size.y * currentScreen->pitch;
         for (int32 id = 0; cnt > 0; --cnt, ++id) {
@@ -614,6 +667,9 @@ void RSDK::FillScreen(uint32 color, int32 alphaR, int32 alphaG, int32 alphaB)
 
 void RSDK::DrawLine(int32 x1, int32 y1, int32 x2, int32 y2, uint32 color, int32 alpha, int32 inkEffect, bool32 screenRelative)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    PSP_FLUSH_3D();
+#endif
     switch (inkEffect) {
         default: break;
 
@@ -1173,6 +1229,37 @@ void RSDK::DrawRectangle(int32 x, int32 y, int32 width, int32 height, uint32 col
         height = FROM_FIXED(height);
     }
 
+#if RETRO_PLATFORM == RETRO_PSP
+    // a GE quad (clipped and inked like a face): full-screen fills (title cards, fades) are costly a pixel at a time
+    if (width > 0 && height > 0) {
+        Vector2 quad[4] = { { TO_FIXED(x), TO_FIXED(y) },
+                            { TO_FIXED(x + width), TO_FIXED(y) },
+                            { TO_FIXED(x + width), TO_FIXED(y + height) },
+                            { TO_FIXED(x), TO_FIXED(y + height) } };
+        if (inkEffect == INK_MASKED) {
+            if (PSPQueueMaskedRect(x, y, x + width, y + height, color & 0xFFFFFF)) {
+                validDraw = true;
+                return;
+            }
+        }
+        else if (PSPQueue3DFace(quad, NULL, color & 0xFFFFFF, 4, alpha, inkEffect))
+            return;
+        if (inkEffect == INK_TINT && PSPTintIsInverse()) {
+            int32 x1 = MAX(x, currentScreen->clipBound_X1), x2 = MIN(x + width, currentScreen->clipBound_X2);
+            int32 y1 = MAX(y, currentScreen->clipBound_Y1), y2 = MIN(y + height, currentScreen->clipBound_Y2);
+            if (x1 >= x2 || y1 >= y2)
+                return;
+            if (PSPInvertBegin(1)) {
+                validDraw = true;
+                PSPInvertSpan(y1, x1, x2, y2 - y1);
+                PSPInvertEnd();
+                return;
+            }
+        }
+    }
+    PSP_FLUSH_3D();
+#endif
+
     if (width + x > currentScreen->clipBound_X2)
         width = currentScreen->clipBound_X2 - x;
 
@@ -1418,6 +1505,18 @@ void RSDK::DrawCircle(int32 x, int32 y, int32 radius, uint32 color, int32 alpha,
             }
 
             // validDraw              = true;
+#if RETRO_PLATFORM == RETRO_PSP
+            if (inkEffect == INK_TINT && top < bottom && PSPTintIsInverse() && PSPInvertBegin(bottom - top)) {
+                for (int32 r = top; r < bottom; ++r) {
+                    int32 s = CLAMP(scanEdgeBuffer[r].start, currentScreen->clipBound_X1, currentScreen->clipBound_X2);
+                    int32 e = CLAMP(scanEdgeBuffer[r].end, currentScreen->clipBound_X1, currentScreen->clipBound_X2);
+                    PSPInvertSpan(r, s, e);
+                }
+                PSPInvertEnd();
+                return;
+            }
+            PSP_FLUSH_3D();
+#endif
             uint16 *frameBuffer = &currentScreen->frameBuffer[top * currentScreen->pitch];
             uint16 color16      = rgb32To16_B[(color >> 0) & 0xFF] | rgb32To16_G[(color >> 8) & 0xFF] | rgb32To16_R[(color >> 16) & 0xFF];
 
@@ -1644,6 +1743,81 @@ void RSDK::DrawCircle(int32 x, int32 y, int32 radius, uint32 color, int32 alpha,
         }
     }
 }
+#if RETRO_PLATFORM == RETRO_PSP
+// Smallest s >= 0 with s * s >= n (n > 0). sqrtf only seeds it; the integer fix-ups make it exact.
+static inline int32 PSPCeilSqrt(int32 n)
+{
+    int32 s = (int32)sqrtf((float)n);
+    while (s * s < n) ++s;
+    while (s > 0 && (s - 1) * (s - 1) >= n) --s;
+    return s;
+}
+
+// Applies DrawCircleOutline's ink effect to row[x0, x1).
+static void PSPOutlineSpan(uint16 *row, int32 x0, int32 x1, int32 inkEffect, uint16 color16, int32 alpha)
+{
+    if (x0 >= x1)
+        return;
+
+    uint16 *frameBuffer = &row[x0];
+    int32 count         = x1 - x0;
+    switch (inkEffect) {
+        default: break;
+
+        case INK_NONE:
+            for (int32 i = 0; i < count; ++i) frameBuffer[i] = color16;
+            break;
+
+        case INK_BLEND:
+            for (int32 i = 0; i < count; ++i) {
+                setPixelBlend(color16, frameBuffer[i]);
+            }
+            break;
+
+        case INK_ALPHA: {
+            uint16 *fbufferBlend = &blendLookupTable[0x20 * (0xFF - alpha)];
+            uint16 *pixelBlend   = &blendLookupTable[0x20 * alpha];
+            for (int32 i = 0; i < count; ++i) {
+                setPixelAlpha(color16, frameBuffer[i], alpha);
+            }
+            break;
+        }
+
+        case INK_ADD: {
+            uint16 *blendTablePtr = &blendLookupTable[0x20 * alpha];
+            for (int32 i = 0; i < count; ++i) {
+                setPixelAdditive(color16, frameBuffer[i]);
+            }
+            break;
+        }
+
+        case INK_SUB: {
+            uint16 *subBlendTable = &subtractLookupTable[0x20 * alpha];
+            for (int32 i = 0; i < count; ++i) {
+                setPixelSubtractive(color16, frameBuffer[i]);
+            }
+            break;
+        }
+
+        case INK_TINT:
+            for (int32 i = 0; i < count; ++i) frameBuffer[i] = tintLookupTable[frameBuffer[i]];
+            break;
+
+        case INK_MASKED:
+            for (int32 i = 0; i < count; ++i)
+                if (frameBuffer[i] == maskColor)
+                    frameBuffer[i] = color16;
+            break;
+
+        case INK_UNMASKED:
+            for (int32 i = 0; i < count; ++i)
+                if (frameBuffer[i] != maskColor)
+                    frameBuffer[i] = color16;
+            break;
+    }
+}
+#endif
+
 void RSDK::DrawCircleOutline(int32 x, int32 y, int32 innerRadius, int32 outerRadius, uint32 color, int32 alpha, int32 inkEffect,
                              bool32 screenRelative)
 {
@@ -1708,6 +1882,48 @@ void RSDK::DrawCircleOutline(int32 x, int32 y, int32 innerRadius, int32 outerRad
             uint16 *frameBuffer = &currentScreen->frameBuffer[left + top * currentScreen->pitch];
             uint16 color16      = rgb32To16_B[(color >> 0) & 0xFF] | rgb32To16_G[(color >> 8) & 0xFF] | rgb32To16_R[(color >> 16) & 0xFF];
             int32 pitch         = (left + currentScreen->pitch - right);
+
+#if RETRO_PLATFORM == RETRO_PSP
+            // The loops below test every pixel of the bounding box, and the clipping above always widens it to
+            // the full screen height: the menu's big background rings cost several ms per frame on hardware.
+            // Draw only the per-row spans instead; they cover exactly the pixels with ir2 <= dx*dx + dy*dy < or2.
+            const bool ge = inkEffect == INK_TINT && top < bottom && PSPTintIsInverse() && PSPInvertBegin(2 * (bottom - top));
+            if (!ge)
+                PSP_FLUSH_3D();
+            uint16 *row = &currentScreen->frameBuffer[top * currentScreen->pitch];
+            for (int32 r = top; r < bottom; ++r, row += currentScreen->pitch) {
+                int32 dy     = r - y;
+                int32 outerA = or2 - dy * dy;
+                if (outerA <= 0)
+                    continue;
+
+                int32 so     = PSPCeilSqrt(outerA) - 1; // |dx| <= so  <=>  dx*dx < outerA
+                int32 innerB = ir2 - dy * dy;
+                int32 si     = innerB > 0 ? PSPCeilSqrt(innerB) : 0; // |dx| >= si  <=>  dx*dx >= innerB
+                if (si > so)
+                    continue;
+
+                if (ge) {
+                    if (!si) {
+                        PSPInvertSpan(r, MAX(left, x - so), MIN(right, x + so + 1));
+                    }
+                    else {
+                        PSPInvertSpan(r, MAX(left, x - so), MIN(right, x - si + 1));
+                        PSPInvertSpan(r, MAX(left, x + si), MIN(right, x + so + 1));
+                    }
+                }
+                else if (!si) {
+                    PSPOutlineSpan(row, MAX(left, x - so), MIN(right, x + so + 1), inkEffect, color16, alpha);
+                }
+                else {
+                    PSPOutlineSpan(row, MAX(left, x - so), MIN(right, x - si + 1), inkEffect, color16, alpha);
+                    PSPOutlineSpan(row, MAX(left, x + si), MIN(right, x + so + 1), inkEffect, color16, alpha);
+                }
+            }
+            if (ge)
+                PSPInvertEnd();
+            return;
+#endif
 
             switch (inkEffect) {
                 default: break;
@@ -1927,6 +2143,12 @@ void RSDK::DrawCircleOutline(int32 x, int32 y, int32 innerRadius, int32 outerRad
 
 void RSDK::DrawFace(Vector2 *vertices, int32 vertCount, int32 r, int32 g, int32 b, int32 alpha, int32 inkEffect)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    // screen-space faces (title card strips, curtains...) go to the GE like the 3D scenes' ones
+    if (PSPQueue3DFace(vertices, NULL, ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF), vertCount, alpha, inkEffect))
+        return;
+    PSP_FLUSH_3D();
+#endif
     switch (inkEffect) {
         default: break;
         case INK_ALPHA:
@@ -2180,6 +2402,11 @@ void RSDK::DrawFace(Vector2 *vertices, int32 vertCount, int32 r, int32 g, int32 
 }
 void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, int32 alpha, int32 inkEffect)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    if (PSPQueue3DFace(vertices, colors, 0, vertCount, alpha, inkEffect))
+        return;
+    PSP_FLUSH_3D();
+#endif
     switch (inkEffect) {
         default: break;
         case INK_ALPHA:
@@ -2280,8 +2507,12 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                         count     = currentScreen->clipBound_X2 - edge->start;
                     }
 
+#if RETRO_PLATFORM == RETRO_PSP
+                    if (count > 0)
+                        pspS3DPixels += count;
+#endif
                     for (int32 x = 0; x < count; ++x) {
-                        frameBuffer[edge->start + x] = (startB >> 19) + ((startG >> 13) & 0x7E0) + ((startR >> 8) & 0xF800);
+                        frameBuffer[edge->start + x] = PACK_SHADE565(startR, startG, startB);
 
                         startR += deltaR;
                         startG += deltaG;
@@ -2330,7 +2561,7 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     }
 
                     for (int32 x = 0; x < count; ++x) {
-                        uint16 color = (startB >> 19) + ((startG >> 13) & 0x7E0) + ((startR >> 8) & 0xF800);
+                        uint16 color = PACK_SHADE565(startR, startG, startB);
                         setPixelBlend(color, frameBuffer[edge->start + x]);
 
                         startR += deltaR;
@@ -2384,7 +2615,7 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     }
 
                     for (int32 x = 0; x < count; ++x) {
-                        uint16 color = (startB >> 19) + ((startG >> 13) & 0x7E0) + ((startR >> 8) & 0xF800);
+                        uint16 color = PACK_SHADE565(startR, startG, startB);
                         setPixelAlpha(color, frameBuffer[edge->start + x], alpha);
 
                         startR += deltaR;
@@ -2437,7 +2668,7 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     }
 
                     for (int32 x = 0; x < count; ++x) {
-                        uint16 color = (startB >> 19) + ((startG >> 13) & 0x7E0) + ((startR >> 8) & 0xF800);
+                        uint16 color = PACK_SHADE565(startR, startG, startB);
                         setPixelAdditive(color, frameBuffer[edge->start + x]);
 
                         startR += deltaR;
@@ -2491,7 +2722,7 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
                     }
 
                     for (int32 x = 0; x < count; ++x) {
-                        uint16 color = (startB >> 19) + ((startG >> 13) & 0x7E0) + ((startR >> 8) & 0xF800);
+                        uint16 color = PACK_SHADE565(startR, startG, startB);
                         setPixelSubtractive(color, frameBuffer[edge->start + x]);
 
                         startR += deltaR;
@@ -2601,7 +2832,7 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
 
                     for (int32 x = 0; x < count; ++x) {
                         if (frameBuffer[edge->start + x] == maskColor)
-                            frameBuffer[edge->start + x] = (startB >> 19) + ((startG >> 13) & 0x7E0) + ((startR >> 8) & 0xF800);
+                            frameBuffer[edge->start + x] = PACK_SHADE565(startR, startG, startB);
 
                         startR += deltaR;
                         startG += deltaG;
@@ -2652,7 +2883,7 @@ void RSDK::DrawBlendedFace(Vector2 *vertices, uint32 *colors, int32 vertCount, i
 
                     for (int32 x = 0; x < count; ++x) {
                         if (frameBuffer[edge->start + x] != maskColor)
-                            frameBuffer[edge->start + x] = (startB >> 19) + ((startG >> 13) & 0x7E0) + ((startR >> 8) & 0xF800);
+                            frameBuffer[edge->start + x] = PACK_SHADE565(startR, startG, startB);
 
                         startR += deltaR;
                         startG += deltaG;
@@ -2876,6 +3107,12 @@ void RSDK::DrawSpriteFlipped(int32 x, int32 y, int32 width, int32 height, int32 
                 return;
             break;
     }
+#if RETRO_PLATFORM == RETRO_PSP
+    if (PSPQueueSpriteRect(x, y, width, height, sprX, sprY, direction, inkEffect, alpha, sheetID)) {
+        validDraw = true;
+        return;
+    }
+#endif
     int32 widthFlip  = width;
     int32 heightFlip = height;
 
@@ -2903,6 +3140,9 @@ void RSDK::DrawSpriteFlipped(int32 x, int32 y, int32 width, int32 height, int32 
 
     if (width <= 0 || height <= 0)
         return;
+#if RETRO_PLATFORM == RETRO_PSP
+    PSP_FLUSH_3D_RECT(x, y, x + width, y + height);
+#endif
 
     GFXSurface *surface = &gfxSurface[sheetID];
     validDraw           = true;
@@ -3638,6 +3878,13 @@ void RSDK::DrawSpriteRotozoom(int32 x, int32 y, int32 pivotX, int32 pivotY, int3
         int32 fullX         = TO_FIXED(sprX + width);
         int32 fullY         = TO_FIXED(sprY + height);
         validDraw           = true;
+#if RETRO_PLATFORM == RETRO_PSP
+        // only scaled (the special stages' rings, shadows' sprites...): straight to the GE, before the double-precision
+        // divisions below (software emulated on the PSP)
+        if (!angle && (direction == FLIP_NONE || direction == FLIP_X)
+            && PSPQueueSpriteScaled(x, y, sprX - pivotX, sprY - pivotY, sprX, sprY, width, height, scaleX, scaleY, direction, inkEffect, alpha, sheetID))
+            return;
+#endif
         int32 fullScaleX    = (int32)((512.0 / (float)scaleX) * 512.0);
         int32 fullScaleY    = (int32)((512.0 / (float)scaleY) * 512.0);
         int32 deltaXLen     = fullScaleX * sine >> 2;
@@ -3665,6 +3912,13 @@ void RSDK::DrawSpriteRotozoom(int32 x, int32 y, int32 pivotX, int32 pivotY, int3
             drawX = sprXPos + deltaX * xLen - deltaXLen * yLen;
             drawY = sprYPos + deltaYLen * yLen + deltaY * xLen;
         }
+#if RETRO_PLATFORM == RETRO_PSP
+        if ((direction == FLIP_NONE || direction == FLIP_X)
+            && PSPQueueSpriteAffine(x, y, sprXPos - (direction == FLIP_X ? (fullScaleX >> 1) : 0), sprYPos, deltaX, deltaY, deltaXLen, deltaYLen,
+                                    sprX, sprY, width, height, inkEffect, alpha, sheetID))
+            return;
+        PSP_FLUSH_3D_RECT(left, top, right + 1, bottom + 1);
+#endif
 
         switch (inkEffect) {
             case INK_NONE:
@@ -3864,6 +4118,9 @@ void RSDK::DrawSpriteRotozoom(int32 x, int32 y, int32 pivotX, int32 pivotY, int3
     }
 }
 
+#if RETRO_PLATFORM == RETRO_PSP
+unsigned long long pspDeformWaitUS, pspDeformLoopUS; // DrawDeformedSprite in software: waiting for the GE, then drawing
+#endif
 void RSDK::DrawDeformedSprite(uint16 sheetID, int32 inkEffect, int32 alpha)
 {
     switch (inkEffect) {
@@ -3893,6 +4150,19 @@ void RSDK::DrawDeformedSprite(uint16 sheetID, int32 inkEffect, int32 alpha)
     GFXSurface *surface    = &gfxSurface[sheetID];
     uint8 *pixels          = surface->pixels;
     int32 clipY1           = currentScreen->clipBound_Y1;
+#if RETRO_PLATFORM == RETRO_PSP
+    clipY1 = PSPQueueDeformedSprite(sheetID, inkEffect, alpha); // the scanlines the GE took are done
+    if (clipY1 >= currentScreen->clipBound_Y2)
+        return;
+    unsigned long long deformStart = PSPProfFine();
+    PSP_FLUSH_3D();
+    unsigned long long deformLoop = PSPProfFine();
+    pspDeformWaitUS += deformLoop - deformStart;
+    struct DeformTimer {
+        unsigned long long start;
+        ~DeformTimer() { pspDeformLoopUS += PSPProfFine() - start; }
+    } deformTimer = { deformLoop };
+#endif
     ScanlineInfo *scanline = &scanlines[clipY1];
     uint16 *frameBuffer    = &currentScreen->frameBuffer[clipY1 * currentScreen->pitch];
     uint8 *lineBuffer      = &gfxLineBuffer[clipY1];
@@ -4032,6 +4302,36 @@ void RSDK::DrawDeformedSprite(uint16 sheetID, int32 inkEffect, int32 alpha)
             break;
 
         case INK_MASKED:
+#if RETRO_PLATFORM == RETRO_PSP
+            // Same pixels, tested the other way round: the screen is read two pixels a word and the sheet is only
+            // sampled where the mask colour is (the special stages' plasma covers a fraction of the screen).
+            if (!(currentScreen->pitch & 1) && !((uintptr_t)frameBuffer & 3)) {
+                const uint16 mask = (uint16)maskColor;
+                for (; clipY1 < currentScreen->clipBound_Y2; ++clipY1) {
+                    uint16 *activePalette = fullPalette[*lineBuffer++];
+                    const uint32 lx = (uint32)scanline->position.x, ly = (uint32)scanline->position.y;
+                    const uint32 dx = (uint32)scanline->deform.x, dy = (uint32)scanline->deform.y;
+                    const uint32 *pairs = (const uint32 *)frameBuffer;
+                    for (int32 i = 0; i < currentScreen->pitch; i += 2) {
+                        uint32 two = pairs[i >> 1];
+                        if ((uint16)two == mask) {
+                            uint8 palIndex = pixels[((FROM_FIXED((int32)(ly + dy * i)) & height) << lineSize) + (FROM_FIXED((int32)(lx + dx * i)) & width)];
+                            if (palIndex)
+                                frameBuffer[i] = activePalette[palIndex];
+                        }
+                        if ((uint16)(two >> 16) == mask) {
+                            uint32 j       = i + 1;
+                            uint8 palIndex = pixels[((FROM_FIXED((int32)(ly + dy * j)) & height) << lineSize) + (FROM_FIXED((int32)(lx + dx * j)) & width)];
+                            if (palIndex)
+                                frameBuffer[j] = activePalette[palIndex];
+                        }
+                    }
+                    frameBuffer += currentScreen->pitch;
+                    ++scanline;
+                }
+                break;
+            }
+#endif
             for (; clipY1 < currentScreen->clipBound_Y2; ++clipY1) {
                 uint16 *activePalette = fullPalette[*lineBuffer++];
                 int32 lx              = scanline->position.x;
@@ -4073,6 +4373,9 @@ void RSDK::DrawDeformedSprite(uint16 sheetID, int32 inkEffect, int32 alpha)
 
 void RSDK::DrawTile(uint16 *tiles, int32 countX, int32 countY, Vector2 *position, Vector2 *offset, bool32 screenRelative)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    PSP_FLUSH_3D();
+#endif
     if (tiles) {
         if (!position)
             position = &sceneInfo.entity->position;
@@ -4306,6 +4609,14 @@ void RSDK::DrawAniTile(uint16 sheetID, uint16 tileIndex, uint16 srcX, uint16 src
                 tilePixels += (TILE_SIZE * 2);
             }
         }
+
+#if RETRO_PLATFORM == RETRO_PSP
+        // animated tiles (waterfalls, flowers...) change every few frames: keep their row flags current
+        if (tileIndex + cnt > TILE_COUNT)
+            PSPUpdateTileFlags(0, TILE_COUNT);
+        else
+            PSPUpdateTileFlags(tileIndex, cnt);
+#endif
     }
 }
 
@@ -4391,6 +4702,9 @@ void RSDK::DrawString(Animator *animator, Vector2 *position, String *string, int
 }
 void RSDK::DrawDevString(const char *string, int32 x, int32 y, int32 align, uint32 color)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    PSP_FLUSH_3D();
+#endif
     uint16 color16 = rgb32To16_B[(color >> 0) & 0xFF] | rgb32To16_G[(color >> 8) & 0xFF] | rgb32To16_R[(color >> 16) & 0xFF];
 
     int32 charOffset   = 0;

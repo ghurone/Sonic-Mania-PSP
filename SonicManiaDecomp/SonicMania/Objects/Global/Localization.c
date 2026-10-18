@@ -34,6 +34,13 @@ void Localization_StageLoad(void)
 
 void Localization_LoadStrings(void)
 {
+#if defined(__psp__)
+    // Portuguese is optional in Data.psp (tools/build_psp_data.py --no-portuguese): chosen with a pack that lacks it, the
+    // game is in English
+    if (Localization->language == LANGUAGE_PT && RSDK.LoadSpriteAnimation("UI/TextPT.bin", SCOPE_STAGE) == (uint16)-1)
+        Localization->language = LANGUAGE_EN;
+#endif
+
     RSDK.InitString(&Localization->text, "", 0);
 
     switch (Localization->language) {
@@ -81,6 +88,12 @@ void Localization_LoadStrings(void)
         case LANGUAGE_TC:
             LogHelpers_Print("Loading Trad Chinese strings...");
             RSDK.LoadStringList(&Localization->text, "StringsTC.txt", 16);
+            break;
+#endif
+#if defined(__psp__)
+        case LANGUAGE_PT:
+            LogHelpers_Print("Loading PT strings...");
+            RSDK.LoadStringList(&Localization->text, "StringsPT.txt", 16);
             break;
 #endif
 

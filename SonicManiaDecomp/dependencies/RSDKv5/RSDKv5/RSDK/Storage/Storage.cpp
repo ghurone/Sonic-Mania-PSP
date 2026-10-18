@@ -25,15 +25,39 @@ enum {
 };
 
 DataStorage RSDK::dataStorage[DATASET_MAX];
+#if RETRO_PLATFORM == RETRO_PSP
+uint32 RSDK::pspStoragePeak[DATASET_MAX]; // highest usedStorage seen (words), for the load report
+#endif
 
 bool32 RSDK::InitStorage()
 {
     // Storage limits.
+#if RETRO_PLATFORM == RETRO_PSP
+    dataStorage[DATASET_STG].storageLimit = PSP_STG_KB * 1024;
+    // With the ATRAC3 music (Music/, see Audio.cpp) tracks stream through a small buffer instead of being loaded whole:
+    // the pool only keeps the stream channel's buffer and room for a small OGG, the rest goes back to the heap.
+    int32 musKB = PSP_MUS_KB;
+    SceUID musicDir = sceIoDopen("Music");
+    if (musicDir >= 0) {
+        sceIoDclose(musicDir);
+        musKB = PSP_MUS_STREAM_KB;
+    }
+    SceUID pspPack = sceIoOpen("Data.psp", PSP_O_RDONLY, 0); // its music is ATRAC3 too
+    if (pspPack >= 0) {
+        sceIoClose(pspPack);
+        musKB = PSP_MUS_STREAM_KB;
+    }
+    dataStorage[DATASET_MUS].storageLimit = musKB * 1024;
+    dataStorage[DATASET_SFX].storageLimit = PSP_SFX_KB * 1024;
+    dataStorage[DATASET_STR].storageLimit = PSP_STR_KB * 1024;
+    dataStorage[DATASET_TMP].storageLimit = PSP_TMP_KB * 1024;
+#else
     dataStorage[DATASET_STG].storageLimit = 24 * 1024 * 1024; // 24MB
     dataStorage[DATASET_MUS].storageLimit = 8 * 1024 * 1024;  //  8MB
     dataStorage[DATASET_SFX].storageLimit = 32 * 1024 * 1024; // 32MB
     dataStorage[DATASET_STR].storageLimit = 2 * 1024 * 1024;  //  2MB
     dataStorage[DATASET_TMP].storageLimit = 8 * 1024 * 1024;  //  8MB
+#endif
 
     for (int32 s = 0; s < DATASET_MAX; ++s) {
         dataStorage[s].usedStorage = 0;
@@ -44,6 +68,12 @@ bool32 RSDK::InitStorage()
         if (dataStorage[s].memoryTable == NULL)
             return false;
     }
+
+#if RETRO_PLATFORM == RETRO_PSP
+    PrintLog(PRINT_NORMAL, "PSP storage: stg=%dKB mus=%dKB sfx=%dKB str=%dKB tmp=%dKB, free after pools: %u KB (largest block %u KB)", PSP_STG_KB,
+             (int32)(dataStorage[DATASET_MUS].storageLimit >> 10), PSP_SFX_KB, PSP_STR_KB, PSP_TMP_KB, (uint32)(sceKernelTotalFreeMemSize() / 1024),
+             (uint32)(sceKernelMaxFreeMemSize() / 1024));
+#endif
 
     return true;
 }
@@ -155,6 +185,13 @@ void RSDK::AllocateStorage(void **dataPtr, uint32 size, StorageDataSets dataSet,
                 }
             }
 
+#if RETRO_PLATFORM == RETRO_PSP
+            if (!*data)
+                PrintLog(PRINT_NORMAL, "PSP OUT OF MEMORY: dataset %d needs %u bytes, %u of %u KB used", dataSet, size,
+                         storage->usedStorage / 256, storage->storageLimit >> 10);
+            if (storage->usedStorage > pspStoragePeak[dataSet])
+                pspStoragePeak[dataSet] = storage->usedStorage;
+#endif
             // If there are too many storage entries, then perform garbage collection.
             if (storage->entryCount >= STORAGE_ENTRY_COUNT)
                 GarbageCollectStorage(dataSet);
@@ -222,6 +259,9 @@ void RSDK::RemoveStorageEntry(void **dataPtr)
 // This defragments the storage, leaving all empty space at the end.
 void RSDK::DefragmentAndGarbageCollectStorage(StorageDataSets set)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    PSPLoadTimer loadTimer(PSPLOAD_DEFRAG);
+#endif
     uint32 processedStorage = 0;
     uint32 unusedStorage    = 0;
 

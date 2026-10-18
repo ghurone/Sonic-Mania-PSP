@@ -397,7 +397,7 @@ void LinkGameLogic(EngineInfo info);
 // ORIGINAL CLASS
 
 // Windows.h already included by master header
-#if !(RETRO_PLATFORM == RETRO_WIN || RETRO_PLATFORM == RETRO_SWITCH)
+#if !(RETRO_PLATFORM == RETRO_WIN || RETRO_PLATFORM == RETRO_SWITCH || RETRO_PLATFORM == RETRO_PSP)
 #include <dlfcn.h>
 #endif
 
@@ -432,6 +432,11 @@ private:
     static Result err;
 
 public:
+#elif RETRO_PLATFORM == RETRO_PSP
+    // The PSP build links game logic into the EBOOT; it has no dlopen API.
+    typedef void *Handle;
+    static constexpr const char *extention = ".prx";
+    static constexpr const char *prefix    = NULL;
 #else
     typedef void *Handle;
     static constexpr const char *prefix    = "lib";
@@ -445,7 +450,10 @@ public:
     static inline Handle PlatformLoadLibrary(std::string path)
     {
         Handle ret;
-#if RETRO_PLATFORM == RETRO_WIN
+#if RETRO_PLATFORM == RETRO_PSP
+        (void)path;
+        ret = NULL;
+#elif RETRO_PLATFORM == RETRO_WIN
         ret = (Handle)LoadLibraryA(path.c_str());
 #else
 #if RETRO_PLATFORM == RETRO_ANDROID
@@ -514,7 +522,9 @@ public:
     static inline void Close(Handle handle)
     {
         if (handle)
-#if RETRO_PLATFORM == RETRO_WIN
+#if RETRO_PLATFORM == RETRO_PSP
+            (void)handle;
+#elif RETRO_PLATFORM == RETRO_WIN
             FreeLibrary(handle);
 #else
             dlclose(handle);
@@ -525,7 +535,10 @@ public:
     {
         if (!handle)
             return NULL;
-#if RETRO_PLATFORM == RETRO_WIN
+#if RETRO_PLATFORM == RETRO_PSP
+        (void)symbol;
+        return NULL;
+#elif RETRO_PLATFORM == RETRO_WIN
         return (void *)GetProcAddress(handle, symbol);
 #else
         return (void *)dlsym(handle, symbol);
@@ -534,7 +547,9 @@ public:
 
     static inline char *GetError()
     {
-#if RETRO_PLATFORM == RETRO_WIN
+#if RETRO_PLATFORM == RETRO_PSP
+        return (char *)"PSP does not support dynamic libraries";
+#elif RETRO_PLATFORM == RETRO_WIN
         return (char *)GetLastErrorAsString();
 #else
         return dlerror();

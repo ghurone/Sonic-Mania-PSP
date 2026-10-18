@@ -10,6 +10,9 @@ SpriteAnimation RSDK::spriteAnimationList[SPRFILE_COUNT];
 
 uint16 RSDK::LoadSpriteAnimation(const char *filePath, uint8 scope)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    PSPLoadTimer loadTimer(PSPLOAD_ANIM);
+#endif
     if (!scope || scope > SCOPE_STAGE)
         return -1;
 

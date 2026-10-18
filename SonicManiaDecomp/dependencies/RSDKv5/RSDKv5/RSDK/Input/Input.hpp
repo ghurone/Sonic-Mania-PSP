@@ -500,6 +500,10 @@ extern int32 gamePadCount;
 #include "GLFW/GLFWInputDevice.hpp"
 #endif
 
+#if RETRO_INPUTDEVICE_PSP
+#include "PSP/PSPInputDevice.hpp"
+#endif
+
 #if RETRO_INPUTDEVICE_PDBOAT
 #include "Paddleboat/PDBInputDevice.hpp"
 #endif

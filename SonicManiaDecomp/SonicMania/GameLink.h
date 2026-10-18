@@ -39,7 +39,11 @@ typedef uint32 color;
 // -------------------------
 
 #ifndef SCREEN_XMAX
+#if defined(__PSP__)
+#define SCREEN_XMAX (432)
+#else
 #define SCREEN_XMAX (1280)
+#endif
 #endif
 
 #ifndef SCREEN_YSIZE
@@ -398,9 +402,16 @@ typedef struct {
 #endif
 } RSDKTouchInfo;
 
+#if defined(__psp__)
+// PSP: the frame lives in VRAM, so the screen only carries a pointer to it - laid out exactly like the engine's
+// ScreenInfo (RSDK/Graphics/Drawing.hpp), 64-byte aligned, so screenInfo[n] lines up for every screen
+typedef struct __attribute__((aligned(64))) {
+    uint16 *frameBuffer;
+#else
 typedef struct {
     // uint16 *frameBuffer;
     uint16 frameBuffer[SCREEN_XMAX * SCREEN_YSIZE];
+#endif
     Vector2 position;
     Vector2 size;
     Vector2 center;
@@ -902,6 +913,9 @@ typedef enum {
     LANGUAGE_KO,
     LANGUAGE_SC,
     LANGUAGE_TC,
+#endif
+#if defined(__psp__)
+    LANGUAGE_PT, // the PSP port's Portuguese (tools/psp_portuguese.py makes its pictures and text)
 #endif
 } GameLanguages;
 

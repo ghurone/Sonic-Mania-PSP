@@ -216,19 +216,19 @@ int32 ReplayDB_Buffer_PackEntry(uint8 *compressed, void *uncompressed)
 
     // position
     if (forcePack || (changes & REPLAY_CHANGED_POS)) {
-        *((int32 *)compressedBuffer) = framePtr->position.x;
+        memcpy(compressedBuffer, &framePtr->position.x, sizeof(int32)); // byte packed: unaligned
         compressedBuffer += sizeof(int32);
 
-        *((int32 *)compressedBuffer) = framePtr->position.y;
+        memcpy(compressedBuffer, &framePtr->position.y, sizeof(int32)); // byte packed: unaligned
         compressedBuffer += sizeof(int32);
     }
 
     // velocity
     if (forcePack || (changes & REPLAY_CHANGED_VEL)) {
-        *((int32 *)compressedBuffer) = framePtr->velocity.x;
+        memcpy(compressedBuffer, &framePtr->velocity.x, sizeof(int32)); // byte packed: unaligned
         compressedBuffer += sizeof(int32);
 
-        *((int32 *)compressedBuffer) = framePtr->velocity.y;
+        memcpy(compressedBuffer, &framePtr->velocity.y, sizeof(int32)); // byte packed: unaligned
         compressedBuffer += sizeof(int32);
     }
 
@@ -279,10 +279,12 @@ int32 ReplayDB_Buffer_UnpackEntry(void *uncompressed, uint8 *compressed)
 
     // position
     if (forceUnpack || (changes & REPLAY_CHANGED_POS)) {
-        int32 x = *(int32 *)compressedBuffer;
+        int32 x;
+        memcpy(&x, compressedBuffer, sizeof(int32)); // byte packed: unaligned
         compressedBuffer += sizeof(int32);
 
-        int32 y = *(int32 *)compressedBuffer;
+        int32 y;
+        memcpy(&y, compressedBuffer, sizeof(int32)); // byte packed: unaligned
         compressedBuffer += sizeof(int32);
 
         framePtr->position.x = x;
@@ -291,10 +293,12 @@ int32 ReplayDB_Buffer_UnpackEntry(void *uncompressed, uint8 *compressed)
 
     // velocity
     if (forceUnpack || (changes & REPLAY_CHANGED_VEL)) {
-        int32 x = *(int32 *)compressedBuffer;
+        int32 x;
+        memcpy(&x, compressedBuffer, sizeof(int32)); // byte packed: unaligned
         compressedBuffer += sizeof(int32);
 
-        int32 y = *(int32 *)compressedBuffer;
+        int32 y;
+        memcpy(&y, compressedBuffer, sizeof(int32)); // byte packed: unaligned
         compressedBuffer += sizeof(int32);
 
         framePtr->velocity.x = x;

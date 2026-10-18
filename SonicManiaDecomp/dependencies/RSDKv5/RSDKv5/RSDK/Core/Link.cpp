@@ -75,8 +75,17 @@ void RSDK::SetupFunctionTables()
 #endif
 
     CalculateTrigAngles();
+#if RETRO_PLATFORM == RETRO_PSP
+    PrintLog(PRINT_NORMAL, "PSPINIT: CalculateTrigAngles done");
+#endif
     GenerateBlendLookupTable();
+#if RETRO_PLATFORM == RETRO_PSP
+    PrintLog(PRINT_NORMAL, "PSPINIT: GenerateBlendLookupTable done");
+#endif
     InitSystemSurfaces();
+#if RETRO_PLATFORM == RETRO_PSP
+    PrintLog(PRINT_NORMAL, "PSPINIT: InitSystemSurfaces done");
+#endif
 
     memset(RSDKFunctionTable, 0, sizeof(RSDKFunctionTable));
 #if RETRO_REV02

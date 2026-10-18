@@ -178,8 +178,34 @@ void RSDK::SKU::ReleaseUserCore()
 #endif
 }
 
+#if RETRO_PLATFORM == RETRO_PSP
+// Achievements unlock mid-level (e.g. the first StarPost); writing the file then stalls the game ~200ms on a
+// Memory Stick. SaveUserData only marks it dirty on PSP and the write happens at the next scene load or exit.
+static bool pspUserDataDirty = false;
+
+void PSPFlushUserData()
+{
+    if (!pspUserDataDirty)
+        return;
+    pspUserDataDirty = false;
+
+#if RETRO_USERCORE_DUMMY
+    int32 achievementsRAM[0x100];
+    memset(achievementsRAM, 0, 0x100 * sizeof(int32));
+    for (int32 i = 0; i < (int32)RSDK::achievementList.size(); ++i) {
+        achievementsRAM[i] = RSDK::achievementList[i].achieved;
+    }
+    RSDK::SKU::SaveUserFile("Achievements.bin", achievementsRAM, 0x100 * sizeof(int32));
+#endif
+}
+#endif
+
 void RSDK::SKU::SaveUserData()
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    pspUserDataDirty = true;
+    return;
+#endif
 #if RETRO_USERCORE_DUMMY
     int32 achievementsRAM[0x100];
     memset(achievementsRAM, 0, 0x100 * sizeof(int32));
@@ -266,6 +292,61 @@ CustomSettings RSDK::customSettings;
 #endif
 
 char buttonNames[18][8] = { "U", "D", "L", "R", "START", "SELECT", "LSTICK", "RSTICK", "L1", "R1", "C", "Z", "A", "B", "X", "Y", "L2", "R2" };
+
+#if RETRO_PLATFORM == RETRO_PSP
+#include <pspiofilemgr.h>
+// The PSP keeps no Settings.ini: with one, the engine would take the PC's video settings from it (windowed, no vsync...)
+// instead of the PSP's own. The few settings its menus change, the language and the volumes, live in PSPSettings.bin
+// instead: read after the rest (LoadSettingsINI), written whenever the game saves its settings - but not before it was
+// read, as the defaults are saved once at boot.
+struct PSPSettingsFile {
+    uint32 signature; // 'PSET'
+    int32 language;
+    float streamVolume;
+    float sfxVolume;
+};
+static bool32 pspSettingsRead = false;
+
+static void PSPSettingsPath(char *path, int32 size) { sprintf_s(path, size, "%sPSPSettings.bin", RSDK::SKU::userFileDir); }
+
+static void PSPLoadSettings()
+{
+    char path[0x100];
+    PSPSettingsPath(path, sizeof(path));
+    PSPSettingsFile settings;
+    SceUID fd = sceIoOpen(path, PSP_O_RDONLY, 0);
+    if (fd >= 0) {
+        if (sceIoRead(fd, &settings, sizeof(settings)) == sizeof(settings) && settings.signature == 0x54455350) {
+            if (settings.language >= 0 && settings.language < 16)
+                RSDK::SKU::curSKU.language = settings.language;
+            if (settings.streamVolume >= 0.0f && settings.streamVolume <= 1.0f)
+                RSDK::engine.streamVolume = settings.streamVolume;
+            if (settings.sfxVolume >= 0.0f && settings.sfxVolume <= 1.0f)
+                RSDK::engine.soundFXVolume = settings.sfxVolume;
+        }
+        sceIoClose(fd);
+    }
+    pspSettingsRead = true;
+}
+
+static void PSPSaveSettings()
+{
+    if (!pspSettingsRead)
+        return;
+    PSPSettingsFile settings;
+    settings.signature    = 0x54455350;
+    settings.language     = RSDK::SKU::curSKU.language;
+    settings.streamVolume = RSDK::engine.streamVolume;
+    settings.sfxVolume    = RSDK::engine.soundFXVolume;
+    char path[0x100];
+    PSPSettingsPath(path, sizeof(path));
+    SceUID fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+    if (fd >= 0) {
+        sceIoWrite(fd, &settings, sizeof(settings));
+        sceIoClose(fd);
+    }
+}
+#endif
 
 void RSDK::LoadSettingsINI()
 {
@@ -556,10 +637,21 @@ void RSDK::LoadSettingsINI()
         SaveSettingsINI(true);
         engine.devMenu = LoadDataPack("Data.rsdk", 0, useBuffer);
     }
+
+#if RETRO_PLATFORM == RETRO_PSP
+    PSPLoadSettings();
+#endif
 }
 
 void RSDK::SaveSettingsINI(bool32 writeToFile)
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    // no Settings.ini on the PSP (PSPLoadSettings): its language and volumes go to PSPSettings.bin
+    if (changedVideoSettings || writeToFile)
+        PSPSaveSettings();
+    return;
+#endif
+
     // the original only saves this file on windows and "dev", consoles use "options.bin"
     // for the decomp, however, we want to save it regardless of platform
 #if RETRO_USE_ORIGINAL_CODE

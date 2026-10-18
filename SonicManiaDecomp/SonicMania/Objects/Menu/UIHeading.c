@@ -29,6 +29,11 @@ void UIHeading_Draw(void)
 {
     RSDK_THIS(UIHeading);
 
+#if defined(__psp__) && MANIA_USE_PLUS
+    if (MainMenu && MainMenu_DrawAchievementsHeading(self))
+        return;
+#endif
+
     RSDK.DrawSprite(&self->headingAnimator, NULL, false);
     RSDK.DrawSprite(&self->textAnimator, NULL, false);
 }
@@ -66,6 +71,9 @@ void UIHeading_LoadSprites(void)
         case LANGUAGE_KO: UIHeading->textFrames = RSDK.LoadSpriteAnimation("UI/HeadingsKO.bin", SCOPE_STAGE); break;
         case LANGUAGE_SC: UIHeading->textFrames = RSDK.LoadSpriteAnimation("UI/HeadingsSC.bin", SCOPE_STAGE); break;
         case LANGUAGE_TC: UIHeading->textFrames = RSDK.LoadSpriteAnimation("UI/HeadingsTC.bin", SCOPE_STAGE); break;
+#endif
+#if defined(__psp__)
+        case LANGUAGE_PT: UIHeading->textFrames = RSDK.LoadSpriteAnimation("UI/HeadingsPT.bin", SCOPE_STAGE); break;
 #endif
 
         default: break;

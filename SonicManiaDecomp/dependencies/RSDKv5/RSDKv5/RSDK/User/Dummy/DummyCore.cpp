@@ -42,15 +42,21 @@ int32 GetAPIValue(uint32 id)
 
         case 0x884E705A: return STATUS_OK; // SYSTEM_USERSTORAGE_STORAGE_STATUS
 
-        case 0xBDF4E94A: return 30; // SYSTEM_USERSTORAGE_AUTH_TIME
+// PSP: the save is a local file, so don't fake half a second of "network" wait (the menus block on these with a spinner)
+#if RETRO_PLATFORM == RETRO_PSP
+#define DUMMY_STORAGE_TIME (1)
+#else
+#define DUMMY_STORAGE_TIME (30)
+#endif
+        case 0xBDF4E94A: return DUMMY_STORAGE_TIME; // SYSTEM_USERSTORAGE_AUTH_TIME
 
-        case 0xD77E98BE: return 30; // SYSTEM_USERSTORAGE_STORAGE_INIT_TIME
+        case 0xD77E98BE: return DUMMY_STORAGE_TIME; // SYSTEM_USERSTORAGE_STORAGE_INIT_TIME
 
-        case 0x5AF715C2: return 30; // SYSTEM_USERSTORAGE_STORAGE_LOAD_TIME
+        case 0x5AF715C2: return DUMMY_STORAGE_TIME; // SYSTEM_USERSTORAGE_STORAGE_LOAD_TIME
 
-        case 0x54378EC5: return 30; // SYSTEM_USERSTORAGE_STORAGE_SAVE_TIME
+        case 0x54378EC5: return DUMMY_STORAGE_TIME; // SYSTEM_USERSTORAGE_STORAGE_SAVE_TIME
 
-        case 0xCD44607D: return 30; // SYSTEM_USERSTORAGE_STORAGE_DELETE_TIME
+        case 0xCD44607D: return DUMMY_STORAGE_TIME; // SYSTEM_USERSTORAGE_STORAGE_DELETE_TIME
     }
 
     return 0;
