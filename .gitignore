@@ -247,3 +247,20 @@ android/local.properties
 
 *.res
 dependencies/*
+# (Sonic Mania PSP: o motor vem junto, não como submódulo)
+!dependencies/RSDKv5/
+
+# Sonic Mania PSP: o que a compilação e a conversão geram
+*.o
+*.d
+psp/EBOOT.PBP
+psp/PARAM.SFO
+psp/*.elf
+psp/*.prx
+# ícone, fundo e som do menu do PSP: cada um coloca os seus (não podem ser distribuídos)
+psp/ICON0.PNG
+psp/PIC1.PNG
+psp/SND0.AT3
+__pycache__/
+Data.rsdk
+Data.psp
