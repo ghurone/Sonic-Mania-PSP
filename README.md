@@ -39,6 +39,16 @@ The git history keeps the original code and the port's changes in separate commi
 - Portuguese as a language (a PORTUGUÊS button in the language menu).
 - An achievements page in the main menu (the PSP has no system list of them).
 
+## The easy way: Google Colab
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ghurone/Sonic-Mania-PSP/blob/master/SonicManiaPSP.ipynb)
+
+The notebook does everything below in Google's cloud, for free, with nothing to install: you upload your `Data.rsdk`
+(or pick it from Google Drive), click **Runtime → Run all**, and about 20 minutes later you download
+`SonicManiaPSP.zip`. Extract it to the root of your Memory Stick and you are done.
+
+The rest of this page is for doing it on your own computer.
+
 ## Requirements
 
 - A **PSP with 64MB of RAM and CFW**: PSP-2000, PSP-3000 or PSP Go. Only the PSP-3000 has been tested. The PSP-1000
