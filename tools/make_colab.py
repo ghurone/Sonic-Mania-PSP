@@ -1,5 +1,6 @@
 """Writes SonicManiaPSP.ipynb, the Google Colab notebook that turns a player's own Data.rsdk into a ready-to-copy
-PSP folder (EBOOT.PBP built from this repository's source + Data.psp). Run it after changing the notebook's cells:
+PSP folder (Data.psp + the EBOOT.PBP of the latest release, which is built without Plus: the notebook never builds a
+Plus EBOOT, by the owner's choice). Run it after changing the notebook's cells:
 
     python tools/make_colab.py
 """
@@ -14,6 +15,12 @@ INTRO = '''# Sonic Mania PSP — converter
 This notebook turns **your own copy** of Sonic Mania Plus into the files the PSP port needs, all in Google's cloud:
 nothing to install on your computer.
 
+> **Before you start:**
+> 1. Click **File → Save a copy in Drive** and use the copy that opens (this one is read-only, so you could not
+>    change the settings in step ①).
+> 2. When you run it, Colab warns that the notebook was not authored by Google: click **Run anyway**. It only
+>    downloads the tools listed in step ③ and the port's code from GitHub.
+
 **You need:** the `Data.rsdk` of Sonic Mania Plus (version 1.06, the Steam one). It is in the game's install folder,
 e.g. `C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sonic Mania\\Data.rsdk` (Steam → right-click the game →
 *Manage* → *Browse local files*).
@@ -22,9 +29,12 @@ e.g. `C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sonic Mania\\Data.rsdk`
 1. Choose your settings in step ① below.
 2. In the menu, click **Runtime → Run all** (or press `Ctrl+F9`).
 3. If you chose to upload, click **Choose files** in step ② and pick your `Data.rsdk`.
-4. Wait (about 15–25 minutes). At the end you get `SonicManiaPSP.zip`.
+4. Wait (about 10–20 minutes). At the end you get `SonicManiaPSP.zip`.
 5. Extract the zip to the **root of your PSP's Memory Stick**: it creates `PSP/GAME/SonicMania/` with `EBOOT.PBP` and
    `Data.psp`.
+
+The game you get is Sonic Mania **without the Plus content** (Encore Mode, Mighty and Ray). If you own the Plus DLC and
+want it, build the EBOOT yourself as explained in the repository's README.
 
 The result contains your game's data: it is for your own use. **Do not share it.**
 Port, source code and credits: [''' + REPO + '''](''' + REPO + ''')
@@ -105,30 +115,16 @@ if head[:4] != b"RSDK":
 print("✔ Data.rsdk ok (%.0f MB)" % size)
 '''
 
-TOOLS = '''#@title ③ Install the tools (about 3 minutes) { display-mode: "form" }
-PSPDEV_TAG = "v20261001"      # the PSP toolchain (pspdev)
-PSPDEV_OLD = "v20241101"      # same, built on an older Linux, for older Colab machines
-ATRACDENC = "0.2.3"           # the ATRAC3 music encoder
+TOOLS = '''#@title ③ Install the tools (about 2 minutes) { display-mode: "form" }
+ATRACDENC = "0.2.3"  # the ATRAC3 music encoder
 
 step("downloading the port's source code...")
 if not os.path.isdir(WORK + "/repo"):
     run("git clone -q --depth 1 ''' + REPO + ''' repo", "tools.log", cwd=WORK)
 
 step("installing build packages...")
-run("apt-get -qq update && apt-get -qq install -y cmake libsndfile1-dev xz-utils libreadline8 libusb-0.1-4 libarchive-tools > /dev/null", "tools.log")
+run("apt-get -qq update && apt-get -qq install -y cmake libsndfile1-dev xz-utils zip > /dev/null", "tools.log")
 run("pip -q install lz4 numpy pillow", "tools.log")
-
-step("installing the PSP toolchain (pspdev)...")
-def pspdev_works():
-    return subprocess.run("%s/pspdev/bin/psp-gcc --version" % WORK, shell=True, capture_output=True).returncode == 0
-for tag in (PSPDEV_TAG, PSPDEV_OLD):
-    if pspdev_works():
-        break
-    shutil.rmtree(WORK + "/pspdev", ignore_errors=True)
-    run("wget -q https://github.com/pspdev/pspdev/releases/download/%s/pspdev-ubuntu-latest-x86_64.tar.gz -O pspdev.tar.gz"
-        " && tar xzf pspdev.tar.gz && rm pspdev.tar.gz" % tag, "tools.log", cwd=WORK)
-if not pspdev_works():
-    raise StepFailed("The PSP toolchain does not run on this machine. Please report it at ''' + REPO + '''/issues")
 
 step("building the ATRAC3 encoder (atracdenc)...")
 if not os.path.exists(WORK + "/atracdenc-bin"):
@@ -148,8 +144,6 @@ if not ffmpeg_ok():
     os.environ["PATH"] = glob.glob(WORK + "/ffmpeg-*linux64*/bin")[0] + ":" + os.environ["PATH"]
 if not ffmpeg_ok():
     raise StepFailed("Could not set up ffmpeg. Please report it at ''' + REPO + '''/issues")
-os.environ["PSPDEV"] = WORK + "/pspdev"
-os.environ["PATH"] = WORK + "/pspdev/bin:" + os.environ["PATH"]
 print("✔ tools ready")
 '''
 
@@ -161,10 +155,11 @@ run("python tools/build_psp_data.py %s %s/Data.psp --atracdenc %s/atracdenc-bin 
 print("✔ Data.psp ready (%.0f MB)" % (os.path.getsize(WORK + "/Data.psp") / 1e6))
 '''
 
-BUILD = '''#@title ⑤ Build the game for the PSP (about 5 minutes) { display-mode: "form" }
-step("compiling EBOOT.PBP from the source code...")
-run("make -j%d" % os.cpu_count(), "build.log", cwd=WORK + "/repo/psp")
-print("✔ EBOOT.PBP ready (%.1f MB)" % (os.path.getsize(WORK + "/repo/psp/EBOOT.PBP") / 1e6))
+BUILD = '''#@title ⑤ The game for the PSP (EBOOT.PBP) { display-mode: "form" }
+step("downloading EBOOT.PBP from the latest release...")
+EBOOT = WORK + "/EBOOT.PBP"
+run("wget -q ''' + REPO + '''/releases/latest/download/EBOOT.PBP -O %s" % EBOOT, "build.log")
+print("✔ EBOOT.PBP ready (%.1f MB)" % (os.path.getsize(EBOOT) / 1e6))
 '''
 
 DELIVER = '''#@title ⑥ Get the result { display-mode: "form" }
@@ -173,7 +168,7 @@ pack = WORK + "/out"
 shutil.rmtree(pack, ignore_errors=True)
 game = pack + "/PSP/GAME/SonicMania"
 os.makedirs(game)
-shutil.copy(WORK + "/repo/psp/EBOOT.PBP", game)
+shutil.copy(EBOOT, game + "/EBOOT.PBP")
 shutil.move(WORK + "/Data.psp", game + "/Data.psp")
 ZIP = "/content/SonicManiaPSP.zip"
 if os.path.exists(ZIP):

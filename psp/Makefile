@@ -8,6 +8,8 @@
 # characters which the native Windows toolchain cannot receive from msys make.
 
 TARGET = SonicMania
+# (plain "make" builds everything: the dependency lines below would otherwise be the default goal)
+.DEFAULT_GOAL := all
 
 DECOMP = ../SonicManiaDecomp
 RSDK   = $(DECOMP)/dependencies/RSDKv5
@@ -70,9 +72,17 @@ PSP_GIF_VERIFY ?= 0
 PSP_VRAM_BENCH ?= 0
 # memory pool sizes for measuring builds, e.g. PSP_POOLS="-DPSP_STG_KB=17408 -DPSP_TMP_KB=3072" (see RetroEngine.hpp)
 PSP_POOLS ?=
+# RELEASE=1: the build to hand out (GitHub releases): the Plus DLC off, as the RSDKv5 license requires of any
+# pre-built executable, and no XMB icon/background/sound (they would be the game's art and music)
+RELEASE ?= 0
+ifeq ($(RELEASE),1)
+AUTOBUILD = 1
+else
+AUTOBUILD = 0
+endif
 
 DEFS = -DRETRO_REVISION=2 -DRETRO_USE_MOD_LOADER=0 -DRETRO_STANDALONE=0 -DRETRO_DISABLE_LOG=0 \
-       -DGAME_INCLUDE_EDITOR=0 -DMANIA_PREPLUS=0 -DGAME_VERSION=6 -DRSDK_AUTOBUILD=0 \
+       -DGAME_INCLUDE_EDITOR=0 -DMANIA_PREPLUS=0 -DGAME_VERSION=6 -DRSDK_AUTOBUILD=$(AUTOBUILD) \
        -DRETRO_DEV_EXTRA=\"PSP\" -DMINIZ_NO_TIME -DTINYXML2_NO_EXCEPTIONS \
        -DPSP_HSCROLL_OPT=$(PSP_HSCROLL_OPT) -DPSP_TILE_BENCH=$(PSP_TILE_BENCH) -DPSP_GIF_VERIFY=$(PSP_GIF_VERIFY) -DPSP_VRAM_BENCH=$(PSP_VRAM_BENCH) $(PSP_POOLS)
 
@@ -97,9 +107,15 @@ EXTRA_TARGETS   = EBOOT.PBP
 PSP_EBOOT_TITLE = Sonic Mania
 # icon, background and menu sound of the XMB: used when present in this folder (they are not distributed: they
 # would be the game's art and music)
+ifeq ($(RELEASE),1)
+PSP_EBOOT_ICON  = NULL
+PSP_EBOOT_PIC1  = NULL
+PSP_EBOOT_SND0  = NULL
+else
 PSP_EBOOT_ICON  = $(if $(wildcard ICON0.PNG),ICON0.PNG,NULL)
 PSP_EBOOT_PIC1  = $(if $(wildcard PIC1.PNG),PIC1.PNG,NULL)
 PSP_EBOOT_SND0  = $(if $(wildcard SND0.AT3),SND0.AT3,NULL)
+endif
 # PSP-3000 target: request the expanded memory profile understood by PPSSPP.
 PSP_LARGE_MEMORY = 1
 

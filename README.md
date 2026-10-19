@@ -41,11 +41,15 @@ The git history keeps the original code and the port's changes in separate commi
 
 ## The easy way: Google Colab
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ghurone/Sonic-Mania-PSP/blob/master/SonicManiaPSP.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1s8eoQ2gVVd5SI3QPp-aZ9BsJkOddxF1X?usp=sharing)
 
 The notebook does everything below in Google's cloud, for free, with nothing to install: you upload your `Data.rsdk`
 (or pick it from Google Drive), click **Runtime → Run all**, and about 20 minutes later you download
 `SonicManiaPSP.zip`. Extract it to the root of your Memory Stick and you are done.
+
+The notebook uses the EBOOT from the latest [release](https://github.com/ghurone/Sonic-Mania-PSP/releases), which is
+built **without the Plus content** (Encore Mode, Mighty and Ray), as the RSDKv5 license requires of pre-built
+executables. If you own the Plus DLC, build the EBOOT yourself (below) to have it.
 
 The rest of this page is for doing it on your own computer.
 
