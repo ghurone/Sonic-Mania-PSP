@@ -88,6 +88,23 @@ void StarPost_StageLoad(void)
 
     DEBUGMODE_ADD_OBJ(StarPost);
 
+#if defined(__psp__)
+    // boot.txt starpost=X (testing): the stage starts at the StarPost at x=X, as if it had been touched
+    extern int pspStartStarPostX;
+    if (pspStartStarPostX > 0 && !StarPost->postIDs[0]) {
+        foreach_all(StarPost, post)
+        {
+            if (FROM_FIXED(post->position.x) == pspStartStarPostX) {
+                StarPost->postIDs[0]            = RSDK.GetEntitySlot(post);
+                StarPost->playerPositions[0].x  = post->position.x;
+                StarPost->playerPositions[0].y  = post->position.y;
+                StarPost->playerDirections[0]   = FLIP_NONE;
+                foreach_break;
+            }
+        }
+    }
+#endif
+
     for (int32 p = 0; p < Player->playerCount; ++p) {
         if (StarPost->postIDs[p]) {
             EntityPlayer *player          = RSDK_GET_ENTITY(p, Player);

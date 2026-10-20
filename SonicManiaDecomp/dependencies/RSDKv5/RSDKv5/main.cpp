@@ -85,6 +85,8 @@ char pspPackName[0x40] = "Data.psp"; // boot.txt "pack=NAME": another Data.psp t
 int pspProfDetail = 0; // boot.txt "prof" (see PSPProfFine)
 int pspLogFiles = 0; // boot.txt "logfiles": LoadFile logs every file it opens (to lay Data.psp out in load order)
 extern "C" int pspSkipShadows = 0; // boot.txt "noshadows": UFO_Shadow draws nothing (to measure what shadows cost)
+extern "C" int pspStartStarPostX = 0; // boot.txt starpost=X: start at the StarPost at x=X (testing, StarPost.c)
+extern "C" int pspUfoInfiniteTime = 0; // boot.txt "ufotime": the special stages' rings stop draining (testing)
 extern "C" int pspShadowChunk = 1; // boot.txt shadowchunk=N: UFO shadows N to a 3D scene (UFO_Shadow.c; 1: each its own, as the original)
 extern "C" int pspShadowBatchOff = 0; // boot.txt "noshadowbatch": one 3D scene per shadow, as the original (to compare)
 extern "C" int pspSmogTest = 0; // boot.txt "smogtest": OOZ's smog always on (Smog.c), to measure it
@@ -215,14 +217,40 @@ int main(int argc, char *argv[])
             extern int pspRotoPageMax;
             pspRotoPageMax = atoi(strstr(bootArgs, "pages=") + 6);
         }
+        if (strstr(bootArgs, "pagesdbg=")) {
+            extern int pspRotoPagesDebug;
+            pspRotoPagesDebug = atoi(strstr(bootArgs, "pagesdbg=") + 9);
+        }
+        if (strstr(bootArgs, "pagesrows=")) {
+            extern int pspRotoPagesRowA, pspRotoPagesRowB;
+            const char *r = strstr(bootArgs, "pagesrows=") + 10;
+            pspRotoPagesRowA = atoi(r);
+            pspRotoPagesRowB = strchr(r, ',') ? atoi(strchr(r, ',') + 1) : 9999;
+        }
+        if (strstr(bootArgs, "pagesnodraw")) {
+            extern int pspRotoPagesNoDraw;
+            pspRotoPagesNoDraw = 1;
+        }
         if (strstr(bootArgs, "pagesalways")) {
             extern int pspRotoPageAB;
             pspRotoPageAB = 0;
+        }
+        if (strstr(bootArgs, "noflatrows")) {
+            extern int pspRotoFlatRows;
+            pspRotoFlatRows = 0;
+        }
+        if (strstr(bootArgs, "pageson")) {
+            extern int pspRotoPagesOn;
+            pspRotoPagesOn = 1;
         }
         if (strstr(bootArgs, "nopages")) {
             extern int pspRotoPagesOn;
             pspRotoPagesOn = 0;
         }
+        if (strstr(bootArgs, "starpost="))
+            pspStartStarPostX = atoi(strstr(bootArgs, "starpost=") + 9);
+        if (strstr(bootArgs, "ufotime"))
+            pspUfoInfiniteTime = 1;
         if (strstr(bootArgs, "shadowchunk="))
             pspShadowChunk = MAX(1, atoi(strstr(bootArgs, "shadowchunk=") + 12));
         if (strstr(bootArgs, "noshadowbatch"))

@@ -253,6 +253,7 @@ struct PSPGe3DItem {
     uint32 maskRef; // mask items: the mask colour as the GE's colour test sees a 5650 texel (0xBBGGRR, low bits masked)
     bool32 scissored; // sprites: drawn within the screen's clip bounds of the time (sx1..sx2, sy1..sy2), not the whole batch
     bool32 clamped;   // layers with their own texture: clamped to its edges instead of repeating (rotozoom pages)
+    bool32 linear;    // layers with their own texture: stored row by row, not swizzled (rotozoom rows without rotation)
     int16 sx1, sy1, sx2, sy2;
     ScePspFMatrix4 world, projection;
 };
@@ -392,12 +393,17 @@ static void PSPArenaChecksum(uint32 *sums)
 #define PSP_ROTO_INDEX_ROWS (256)
 static uint8 *pspRotoIndexBuffer;
 static int32 pspRotoIndexUsed;
+// Rows of rotozoom layers without rotation (PSPRotoFlatRow): 512 texels each, swizzled, handed out like the index rows
+#define PSP_ROTO_FLAT_ROWS (256)
+static uint8 *pspRotoFlatBuffer;
+static int32 pspRotoFlatUsed;
 
 static void PSPGe3DUseFirstArena()
 {
     pspGe3DCur       = 0;
     pspGe3DArena     = pspGe3DArenas[0];
     pspRotoIndexUsed = 0; // (the GE is idle)
+    pspRotoFlatUsed  = 0;
 }
 
 // mid: kicked mid-frame without waiting, the CPU going on with the other arena (PSPKick3DMid)
@@ -420,8 +426,14 @@ static void PSPGeClearDepth(ScreenInfo *screen)
     sceGuSendCommandi(211, 0);
 }
 
+extern int pspRotoPagesDebug; // (debugging, boot.txt pagesdbg=N: 1 page lines untextured, 2 from the atlas, 3 not drawn, 4 unswizzled)
+// (debugging, boot.txt dumpframes: the GE batches of the frames being dumped)
+#define PSP_DUMPING (pspDumpStart >= 0 && pspDumpCount > 0 && pspFrameIndex >= pspDumpStart)
 static void PSPKick3DEx(bool wait, bool mid)
 {
+    if (PSP_DUMPING)
+        PrintLog(PRINT_NORMAL, "PSP dbg f%d kick mid=%d wait=%d items=%d arena=%u cur=%d inflight=%d rect=%d,%d-%d,%d", pspFrameIndex, (int)mid,
+                 (int)wait, pspGe3DItemCount, pspGe3DArenaUsed, pspGe3DCur, (int)pspGe3DInFlight, pspGe3DX1, pspGe3DY1, pspGe3DX2, pspGe3DY2);
     psp3DPending = false;
     if (!pspGe3DItemCount) {
         if (pspGe3DInFlight) {
@@ -645,11 +657,16 @@ static void PSPKick3DEx(bool wait, bool mid)
                 // the CPU drew (sprites, 1:1)
                 const bool indexRows = item->prim == GU_SPRITES;
                 sceGuEnable(GU_TEXTURE_2D);
-                sceGuTexMode(GU_PSM_T8, 0, 0, indexRows ? 0 : 1);
+                if (item->clamped && pspRotoPagesDebug == 1)
+                    sceGuDisable(GU_TEXTURE_2D);
+                sceGuTexMode(GU_PSM_T8, 0, 0, indexRows || item->linear || (item->clamped && (pspRotoPagesDebug == 4 || pspRotoPagesDebug == 7)) ? 0 : 1);
+                if (item->clamped && (pspRotoPagesDebug == 2 || pspRotoPagesDebug == 7))
+                    sceGuTexImage(0, 512, 512, 512, PSPTileAtlas());
+                else
                 sceGuTexImage(0, item->tbw, item->texH, item->tbw, item->tex);
                 sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
                 sceGuTexFilter(GU_NEAREST, GU_NEAREST);
-                const int32 wrap = indexRows || item->clamped ? GU_CLAMP : GU_REPEAT;
+                const int32 wrap = indexRows || (item->clamped && pspRotoPagesDebug != 5 && pspRotoPagesDebug != 6) ? GU_CLAMP : GU_REPEAT;
                 sceGuTexWrap(wrap, wrap);
                 sceGuEnable(GU_ALPHA_TEST); // palette index 0 is transparent
                 sceGuAlphaFunc(GU_GREATER, 0, 0xFF);
@@ -676,6 +693,8 @@ static void PSPKick3DEx(bool wait, bool mid)
             sceGuClutLoad(256 / 8, &pspGe3DArena[item->clutOffset]);
             if (item->prim == GU_TRIANGLE_STRIP)
                 sceGuDrawArray(GU_TRIANGLE_STRIP, GU_TEXTURE_32BITF | GU_VERTEX_16BIT | GU_TRANSFORM_2D, item->count, 0, &pspGe3DArena[item->offset]);
+            else if (item->prim == GU_LINES && item->clamped && pspRotoPagesDebug == 3)
+                ; // (debugging: the state set, nothing drawn)
             else if (item->prim == GU_LINES)
                 sceGuDrawArray(GU_LINES, GU_TEXTURE_32BITF | GU_VERTEX_16BIT | GU_TRANSFORM_2D, item->count, 0, &pspGe3DArena[item->offset]);
             else
@@ -1060,6 +1079,7 @@ static PSPGe3DItem *PSPGeLayerItem(int32 bank, int32 prim, uint32 reserveBytes, 
     item->prim        = prim;
     item->tex         = tex; // NULL: the tile atlas
     item->clamped     = false;
+    item->linear      = false;
     item->tbw         = texW;
     item->texH        = texH;
     item->clutOffset  = clutOffset;
@@ -1123,6 +1143,9 @@ static bool32 PSPGeLayerBegin(TileLayer *layer, int32 x1, int32 y1, int32 x2, in
 {
     if (psp3DPending && pspGe3DScreen != currentScreen)
         PSPFlush3D();
+    if (PSP_DUMPING)
+        PrintLog(PRINT_NORMAL, "PSP dbg f%d layer %d rows %d-%d items=%d arena=%u cur=%d", pspFrameIndex, (int32)(layer - tileLayers), y1, y2,
+                 pspGe3DItemCount, pspGe3DArenaUsed, pspGe3DCur);
     pspGeLayerX1 = x1, pspGeLayerY1 = y1, pspGeLayerX2 = MIN(x2, PSP_BUF_WIDTH), pspGeLayerY2 = y2;
     PSPGe3DGrowBounds(pspGeLayerX1, pspGeLayerY1, pspGeLayerX2, pspGeLayerY2);
     return true;
@@ -1884,9 +1907,12 @@ static PSPRotoCellMap *pspRotoCells;
 // are copied in, all before this layer's lines are queued - when the previous frame's lists are done reading them
 // (PSPWaitDisplayList, before any drawing). The textures live in the stage's storage (no VRAM is left; the special
 // stages leave ~6MB of it unused), taken only while there is room without moving anything else.
-int pspRotoPagesOn  = 1; // boot.txt "nopages" turns it off
+int pspRotoPagesOn  = 0; // off: in UFO7 some batches with page lines were dropped by the GE (floor and more vanished); boot.txt "pageson" turns it on (testing), "nopages" off
 int pspRotoPageMin  = 6; // boot.txt pagemin=N: only rows averaging at least N pixels per tile (farther ones minify: slow for the GE from RAM)
 int pspRotoPageMax  = 12; // boot.txt pages=N: textures at most
+int pspRotoPagesNoDraw = 0;
+int pspRotoPagesDebug = 0;
+int pspRotoPagesRowA = 0, pspRotoPagesRowB = 9999; // (debugging, boot.txt pagesrows=A,B: page lines only for rows [A, B))
 unsigned int pspRotoPageRows, pspRotoPageLines, pspRotoPageCopies; // (diagnostics)
 #define PSP_ROTO_PAGE_TILES  (32)
 #define PSP_ROTO_PAGE_SHIFT  (25) // a page is 32 tiles of 16 pixels, in 16.16
@@ -1897,8 +1923,9 @@ unsigned int pspRotoPageRows, pspRotoPageLines, pspRotoPageCopies; // (diagnosti
 #define PSP_ROTO_PAGE_BYTES  (512 * 512)
 struct PSPRotoPage {
     uint8 *tex;    // 512x512 8-bit, swizzled
-    uint32 id;     // the page of the layer it holds, (y << 16) | x (0xFFFFFFFF: none)
+    uint32 id;     // the page it holds: (layer << 24) | (y << 16) | x (0xFFFFFFFF: none)
     uint32 usedAt; // the last layer call it served
+    int32 usedFrame; // the frame of that call: its lines may still be drawn from it until the frame is shown
     uint32 minX, minY, maxX, maxY; // that call: the bounds of its samples (16.16 within the page)
     uint16 slots[PSP_ROTO_PAGE_TILES * PSP_ROTO_PAGE_TILES]; // the tileset entry each slot holds (0xFEFE: nothing yet)
 };
@@ -1911,7 +1938,6 @@ static uint32 *pspRotoPageMem;   // the storage block (released, the engine's wa
 static uint32 *pspRotoPageMemAt; // where it was when the textures were laid out (a defragment moves it)
 static int32 pspRotoPageCount;   // textures in it
 static bool pspRotoPagesFailed;  // no room (until the next scene)
-static TileLayer *pspRotoPageLayer;
 static uint32 pspRotoPageSerial, pspRotoPageCall;
 
 // Pages trade CPU work for GE work, and the GE samples them slowly from RAM: worth it only while the CPU is what holds
@@ -1926,8 +1952,12 @@ static bool PSPRotoPagesWanted()
     static unsigned long long last, time[2], kept;
     static uint32 timed[2];
     static bool chosen = true, previous = true;
+    static int32 decidedFrame = -1;
     if (!pspRotoPageAB)
         return true;
+    if (decidedFrame == pspFrameIndex)
+        return previous; // (the frame's other layers go the same way)
+    decidedFrame = pspFrameIndex;
     const unsigned long long now = sceKernelGetSystemTimeWide();
     const uint32 frame = (uint32)MIN(now - last, 100000ULL);
     last = now;
@@ -1959,6 +1989,8 @@ static bool PSPRotoPagesWanted()
         kept  = 0;
     }
     previous = use;
+    if (pspDumpStart >= 0 && pspDumpCount > 0 && pspFrameIndex >= pspDumpStart) // (boot.txt dumpframes: which way each frame was drawn)
+        PrintLog(PRINT_NORMAL, "PSP dump frame %d: pages %s", pspFrameIndex, use ? "on" : "off");
     return use;
 }
 
@@ -1975,7 +2007,6 @@ void PSPRotoFreeMaps()
     pspRotoPageMem     = NULL; // (the stage's storage is reset with the scene; else the engine collects it)
     pspRotoPageCount   = 0;
     pspRotoPagesFailed = false;
-    pspRotoPageLayer   = NULL;
 }
 
 static bool PSPRotoPagesReady(TileLayer *layer)
@@ -1997,26 +2028,29 @@ static bool PSPRotoPagesReady(TileLayer *layer)
         }
         pspRotoPageCount = count;
         pspRotoPageMemAt = NULL;
-        PrintLog(PRINT_NORMAL, "PSP rotozoom pages: %d (%d KB of stage storage)", count, count * PSP_ROTO_PAGE_BYTES >> 10);
+        PrintLog(PRINT_NORMAL, "PSP rotozoom pages: %d (%d KB of stage storage, %p-%p; pool %p-%p)", count, count * PSP_ROTO_PAGE_BYTES >> 10,
+                 pspRotoPageMem, (uint8 *)pspRotoPageMem + count * PSP_ROTO_PAGE_BYTES + 64, storage->memoryTable,
+                 (uint8 *)storage->memoryTable + storage->storageLimit);
     }
     if (pspRotoPageMemAt != pspRotoPageMem) { // new, or moved: lay the textures out again
         uint8 *base = (uint8 *)(((uintptr_t)pspRotoPageMem + 63) & ~(uintptr_t)63);
         for (int32 i = 0; i < pspRotoPageCount; ++i) {
             pspRotoPages[i].tex    = base + i * PSP_ROTO_PAGE_BYTES;
-            pspRotoPages[i].id     = 0xFFFFFFFF;
-            pspRotoPages[i].usedAt = 0;
+            pspRotoPages[i].id        = 0xFFFFFFFF;
+            pspRotoPages[i].usedAt    = 0;
+            pspRotoPages[i].usedFrame = -1;
         }
         pspRotoPageMemAt = pspRotoPageMem;
     }
-    if (pspRotoPageLayer != layer || pspRotoPageSerial != pspTileSerial) {
+    if (pspRotoPageSerial != pspTileSerial) {
         for (int32 i = 0; i < pspRotoPageCount; ++i) pspRotoPages[i].id = 0xFFFFFFFF;
-        pspRotoPageLayer  = layer;
         pspRotoPageSerial = pspTileSerial;
     }
     return true;
 }
 
-// The texture holding page id for this call, taking the one unused longest; -1 when all serve this call already.
+// The texture holding page id for this call, taking the one unused longest; -1 when all serve this frame already (a
+// texture another layer used this frame is still to be drawn from: UFO7 draws its sky and its track from pages).
 static int32 PSPRotoPageFor(uint32 id)
 {
     int32 victim = -1;
@@ -2026,7 +2060,7 @@ static int32 PSPRotoPageFor(uint32 id)
             victim = i;
             break;
         }
-        if (page->usedAt != pspRotoPageCall && (victim < 0 || page->usedAt < pspRotoPages[victim].usedAt))
+        if (page->usedFrame != pspFrameIndex && (victim < 0 || page->usedAt < pspRotoPages[victim].usedAt))
             victim = i;
     }
     if (victim < 0)
@@ -2036,6 +2070,7 @@ static int32 PSPRotoPageFor(uint32 id)
         page->id = id;
         memset(page->slots, 0xFE, sizeof(page->slots));
     }
+    page->usedFrame = pspFrameIndex;
     if (page->usedAt != pspRotoPageCall) {
         page->usedAt = pspRotoPageCall;
         page->minX = page->minY = 0xFFFFFFFF;
@@ -2051,6 +2086,7 @@ static bool PSPRotoRowPages(TileLayer *layer, const ScanlineInfo *line, uint32 l
 {
     const uint32 mask   = (1U << PSP_ROTO_PAGE_SHIFT) - 1;
     const uint32 pagesX = ((1U << layer->widthShift) >> 5) - 1, pagesY = ((1U << layer->heightShift) >> 5) - 1;
+    const uint32 layerKey = (uint32)(layer - tileLayers) << 24;
     uint32 x = (uint32)line->position.x, y = (uint32)line->position.y;
     const int32 dx = line->deform.x, dy = line->deform.y;
     const uint32 ax = dx < 0 ? (uint32)-dx : (uint32)dx, ay = dy < 0 ? (uint32)-dy : (uint32)dy;
@@ -2068,7 +2104,7 @@ static bool PSPRotoRowPages(TileLayer *layer, const ScanlineInfo *line, uint32 l
             const uint32 dist = dy > 0 ? (mask + 1) - (y & mask) : (y & mask) + 1;
             run = MIN(run, (dist + ay - 1) / ay);
         }
-        const int32 slot = PSPRotoPageFor((((y >> PSP_ROTO_PAGE_SHIFT) & pagesY) << 16) | ((x >> PSP_ROTO_PAGE_SHIFT) & pagesX));
+        const int32 slot = PSPRotoPageFor(layerKey | (((y >> PSP_ROTO_PAGE_SHIFT) & pagesY) << 16) | ((x >> PSP_ROTO_PAGE_SHIFT) & pagesX));
         if (slot >= 0) {
             PSPRotoPage *page = &pspRotoPages[slot];
             const uint32 sx = x & mask, sy = y & mask;
@@ -2096,7 +2132,7 @@ static void PSPRotoPageTiles(TileLayer *layer, PSPRotoPage *page)
     const uint32 margin = 0x2000, mask = (1U << PSP_ROTO_PAGE_SHIFT) - 1;
     const uint32 tx0 = (page->minX > margin ? page->minX - margin : 0) >> 20, tx9 = MIN(page->maxX + margin, mask) >> 20;
     const uint32 ty0 = (page->minY > margin ? page->minY - margin : 0) >> 20, ty9 = MIN(page->maxY + margin, mask) >> 20;
-    const uint32 baseX = (page->id & 0xFFFF) * PSP_ROTO_PAGE_TILES, baseY = (page->id >> 16) * PSP_ROTO_PAGE_TILES;
+    const uint32 baseX = (page->id & 0xFFFF) * PSP_ROTO_PAGE_TILES, baseY = ((page->id >> 16) & 0xFF) * PSP_ROTO_PAGE_TILES;
     for (uint32 ty = ty0; ty <= ty9; ++ty) {
         const uint16 *row = &layer->layout[(baseY + ty) << layer->widthShift];
         uint16 *slots     = &page->slots[ty * PSP_ROTO_PAGE_TILES];
@@ -2202,6 +2238,31 @@ static const PSPRotoCellMap *PSPRotoCellBits(TileLayer *layer)
         map->refreshRow = map->refreshRow + 1 >= (uint32)h ? 0 : map->refreshRow + 1;
     }
     return map;
+}
+
+// Rows without rotation (deform.y 0) read a single row of the layer's pixels, scaled: that row, 512 texels (a narrower
+// layer repeated across them), as the software sampler reads it (tileset entries with their flips, empty tiles as 0),
+// becomes a row of the CPU-drawn rows buffer, and the GE draws the screen row from it as one line - instead of a
+// segment per tile crossed (FBZ1's inside background: 5.9ms of segments, 240 rows a frame).
+int pspRotoFlatRows = 1; // boot.txt "noflatrows" turns it off
+unsigned int pspRotoFlatCount; // (diagnostics)
+static void PSPRotoFlatRow(TileLayer *layer, uint32 py, int32 rowID)
+{
+    const uint32 y      = (py >> 16) & ((TILE_SIZE << layer->heightShift) - 1);
+    const uint16 *row   = &layer->layout[(y >> 4) << layer->widthShift];
+    const uint32 tiles  = 1U << layer->widthShift, sub = (y & 15) << 4;
+    // swizzled 512-texel rows: block (rowID / 8, column / 16) holds 128 bytes, a row of it 16
+    uint8 *band = &pspRotoFlatBuffer[(rowID >> 3) * (512 / 16) * 128 + (rowID & 7) * 16];
+    for (uint32 c = 0; c < 512 / TILE_SIZE; ++c) {
+        uint32 *out      = (uint32 *)&band[c * 128];
+        const uint32 key = row[c & (tiles - 1)] & 0xFFF; // (a narrower layer repeats across the 512 texels)
+        if (pspTileRowEmpty[key] == 0xFFFF) {
+            out[0] = out[1] = out[2] = out[3] = 0;
+            continue;
+        }
+        const uint32 *src = (const uint32 *)&tilesetPixels[(key << 8) + sub];
+        out[0] = src[0], out[1] = src[1], out[2] = src[2], out[3] = src[3];
+    }
 }
 
 bool32 RSDK::PSPQueueLayerRotozoom(TileLayer *layer)
@@ -2312,6 +2373,18 @@ bool32 RSDK::PSPQueueLayerRotozoom(TileLayer *layer)
                     PSPRotoPageTiles(layer, &pspRotoPages[i]);
             }
         }
+        if (PSP_DUMPING) {
+            int32 rows = 0, pieces = 0;
+            for (int32 cy = top; cy < bottom; ++cy) rows += pageRuns[cy] != 0, pieces += pageRuns[cy];
+            PrintLog(PRINT_NORMAL, "PSP dbg f%d roto layer %d: %dx%d tiles (shift %d,%d) rows %d-%d, paged rows %d pieces %d", pspFrameIndex,
+                     layerID, layer->xsize, layer->ysize, layer->widthShift, layer->heightShift, top, bottom, rows, pieces);
+            for (int32 i = 0; i < pspRotoPageCount; ++i) {
+                PSPRotoPage *page = &pspRotoPages[i];
+                if (page->usedAt == pspRotoPageCall)
+                    PrintLog(PRINT_NORMAL, "PSP dbg   page %d id %08X tex %p bounds %X,%X-%X,%X", i, page->id, page->tex, page->minX, page->minY,
+                             page->maxX, page->maxY);
+            }
+        }
     }
 
     if (cpuRows) {
@@ -2360,12 +2433,14 @@ bool32 RSDK::PSPQueueLayerRotozoom(TileLayer *layer)
     walk.xsize   = MIN(layer->xsize, 1 << layer->widthShift);
     const uint32 blocksX  = MAX(1, (1 << layer->widthShift) >> 5);
 
-    if (paged) {
+    if (paged && !pspRotoPagesNoDraw) { // (pspRotoPagesNoDraw, boot.txt "pagesnodraw": debugging, pages prepared but not drawn)
         // page by page (an item per page and palette bank), a line per piece of row: its ends half a step outside the
         // engine's first and last samples (the GE samples at pixel centres), clamped to the page (a sample straying
         // past its edge takes the edge texel instead of the far side's)
         const uint32 mask = (1U << PSP_ROTO_PAGE_SHIFT) - 1;
         const float texel = 1.0f / 65536.0f;
+        float dbgMinU = 1e9f, dbgMaxU = -1e9f, dbgMinV = 1e9f, dbgMaxV = -1e9f, dbgSpan = 0, dbgDu = 0, dbgDv = 0;
+        int32 dbgSpanRow = -1, dbgSpanLen = 0;
         for (int32 i = 0; i < pspRotoPageCount; ++i) {
             PSPRotoPage *page = &pspRotoPages[i];
             if (page->usedAt != pspRotoPageCall)
@@ -2373,19 +2448,34 @@ bool32 RSDK::PSPQueueLayerRotozoom(TileLayer *layer)
             for (int32 cy = top; cy < bottom; ++cy) {
                 for (uint32 n = 0; n < pageRuns[cy]; ++n) {
                     const PSPRotoPiece *piece = &pagePieces[cy][n];
-                    if (piece->page != i)
+                    if (piece->page != i || cy < pspRotoPagesRowA || cy >= pspRotoPagesRowB)
                         continue;
                     const ScanlineInfo *line = &scanlines[cy];
                     const int32 dx = line->deform.x, dy = line->deform.y;
                     const float du = (float)dx * texel, dv = (float)dy * texel;
-                    const float u0 = (float)(((uint32)line->position.x + piece->k0 * (uint32)dx) & mask) * texel;
-                    const float v0 = (float)(((uint32)line->position.y + piece->k0 * (uint32)dy) & mask) * texel;
+                    const float pageOff = pspRotoPagesDebug == 6 ? 512.0f : 0.0f; // (debugging: coordinates kept positive)
+                    const float u0 = (float)(((uint32)line->position.x + piece->k0 * (uint32)dx) & mask) * texel + pageOff;
+                    const float v0 = (float)(((uint32)line->position.y + piece->k0 * (uint32)dy) & mask) * texel + pageOff;
                     const float run = (float)(piece->k1 - piece->k0);
                     PSPGe3DItem *item  = PSPGeLayerItem(gfxLineBuffer[cy], GU_LINES, 2 * sizeof(PSPGeLineVertex), page->tex, 512, 512);
                     item->clamped      = true;
                     PSPGeLineVertex *v = (PSPGeLineVertex *)&pspGe3DArena[pspGe3DArenaUsed];
                     v[0].u = u0 - 0.5f * du, v[0].v = v0 - 0.5f * dv, v[0].x = x1 + piece->k0, v[0].y = cy, v[0].z = 0;
                     v[1].u = u0 + (run - 0.5f) * du, v[1].v = v0 + (run - 0.5f) * dv, v[1].x = x1 + piece->k1, v[1].y = cy, v[1].z = 0;
+                    if (pspRotoPagesDebug == 8) // (debugging: within one tile, as the walk's segments)
+                        v[0].u = 2.0f, v[0].v = 2.0f, v[1].u = 14.0f, v[1].v = 14.0f;
+                    if (PSP_DUMPING && ((cy >= 146 && cy < 156) || (cy >= 176 && cy < 180)))
+                        PrintLog(PRINT_NORMAL, "PSP dbg L r%d p%d it%d bank%d x%d-%d uv %.2f,%.2f-%.2f,%.2f", cy, i, (int32)(item - pspGe3DItems), gfxLineBuffer[cy],
+                                 v[0].x, v[1].x, v[0].u, v[0].v, v[1].u, v[1].v);
+                    if (PSP_DUMPING) {
+                        for (int32 e = 0; e < 2; ++e) {
+                            dbgMinU = MIN(dbgMinU, v[e].u), dbgMaxU = MAX(dbgMaxU, v[e].u);
+                            dbgMinV = MIN(dbgMinV, v[e].v), dbgMaxV = MAX(dbgMaxV, v[e].v);
+                        }
+                        float span = fabsf(v[1].u - v[0].u) + fabsf(v[1].v - v[0].v);
+                        if (span > dbgSpan)
+                            dbgSpan = span, dbgSpanRow = cy, dbgSpanLen = piece->k1 - piece->k0, dbgDu = du, dbgDv = dv;
+                    }
                     item->count += 2;
                     pspGe3DArenaUsed += 2 * sizeof(PSPGeLineVertex);
                     pspGeLayerSprites++;
@@ -2394,10 +2484,44 @@ bool32 RSDK::PSPQueueLayerRotozoom(TileLayer *layer)
             }
         }
         for (int32 cy = top; cy < bottom; ++cy) pspRotoPageRows += pageRuns[cy] != 0;
+        if (PSP_DUMPING)
+            PrintLog(PRINT_NORMAL, "PSP dbg f%d page lines: u %.2f..%.2f v %.2f..%.2f; longest texel span %.1f (row %d, %d px, du %.3f dv %.3f)",
+                     pspFrameIndex, dbgMinU, dbgMaxU, dbgMinV, dbgMaxV, dbgSpan, dbgSpanRow, dbgSpanLen, dbgDu, dbgDv);
+    }
+
+    static bool flatRow[SCREEN_YSIZE];
+    if (pspRotoFlatRows && overlap && !pspRotoFlatBuffer)
+        pspRotoFlatBuffer = (uint8 *)memalign(64, 512 * PSP_ROTO_FLAT_ROWS);
+    const bool flatOK = pspRotoFlatRows && overlap && pspRotoFlatBuffer && lineSize <= 512 && (TILE_SIZE << layer->widthShift) <= 512;
+    for (int32 cy = geTop; cy < geBottom; ++cy) {
+        flatRow[cy] = false;
+        const ScanlineInfo *line = &scanlines[cy];
+        if (!flatOK || !onGE[cy] || viaIndex[cy] || (paged && pageRuns[cy]) || line->deform.y || !line->deform.x
+            || pspRotoFlatUsed >= PSP_ROTO_FLAT_ROWS)
+            continue;
+        const int32 row = pspRotoFlatUsed++;
+        PSPRotoFlatRow(layer, (uint32)line->position.y, row);
+        // the line's ends half a step outside the engine's first and last samples (the GE samples at pixel centres);
+        // whole rows ahead of the start keep every coordinate positive, whichever way it heads; v at the row's centre
+        const int32 dx     = line->deform.x;
+        const uint32 ax    = dx < 0 ? -dx : dx;
+        const float texel  = 1.0f / 65536.0f;
+        const float offU   = (float)(512 * (1 + (uint32)(((uint64)(lineSize + 1) * ax) >> 16) / 512));
+        const float du     = (float)dx * texel;
+        const float u0     = (float)((uint32)line->position.x & ((512U << 16) - 1)) * texel + offU;
+        PSPGe3DItem *item  = PSPGeLayerItem(gfxLineBuffer[cy], GU_LINES, 2 * sizeof(PSPGeLineVertex), pspRotoFlatBuffer, 512, PSP_ROTO_FLAT_ROWS);
+        PSPGeLineVertex *v = (PSPGeLineVertex *)&pspGe3DArena[pspGe3DArenaUsed];
+        v[0].u = u0 - 0.5f * du, v[0].v = (float)row + 0.5f, v[0].x = x1, v[0].y = cy, v[0].z = 0;
+        v[1].u = u0 + ((float)lineSize - 0.5f) * du, v[1].v = (float)row + 0.5f, v[1].x = x2, v[1].y = cy, v[1].z = 0;
+        item->count += 2;
+        pspGe3DArenaUsed += 2 * sizeof(PSPGeLineVertex);
+        pspGeLayerSprites++;
+        pspRotoFlatCount++;
+        flatRow[cy] = true;
     }
 
     for (int32 cy = geTop; cy < geBottom; ++cy) {
-        if (!onGE[cy])
+        if (!onGE[cy] || flatRow[cy])
             continue;
         ScanlineInfo *line = &scanlines[cy];
         uint32 px = (uint32)line->position.x, py = (uint32)line->position.y;

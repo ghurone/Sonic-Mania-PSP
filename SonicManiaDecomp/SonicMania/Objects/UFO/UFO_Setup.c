@@ -414,6 +414,9 @@ void UFO_Setup_State_FinishFadeout(void)
     }
 }
 
+#if defined(__psp__)
+extern int pspUfoInfiniteTime; // boot.txt "ufotime" (testing only): the rings stop draining
+#endif
 void UFO_Setup_State_HandleRingDrain(void)
 {
     RSDK_THIS(UFO_Setup);
@@ -421,7 +424,11 @@ void UFO_Setup_State_HandleRingDrain(void)
     if (++self->timer == 60) {
         self->timer = 0;
 
+#if defined(__psp__)
+        if (UFO_Setup->rings > 0 && SceneInfo->timeEnabled && !pspUfoInfiniteTime)
+#else
         if (UFO_Setup->rings > 0 && SceneInfo->timeEnabled)
+#endif
             UFO_Setup->rings--;
 
         if (!UFO_Setup->rings && !UFO_Setup->timedOut) {

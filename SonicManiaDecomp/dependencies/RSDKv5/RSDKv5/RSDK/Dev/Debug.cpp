@@ -36,6 +36,8 @@ static bool pspLogBuffered = false; // false until the first PSPFlushLog(): boot
 // play logs nothing at all (not even to RAM). Test runs write log.txt, or keep the newest 32KB in RAM with "nolog".
 int pspLogToCard = 0;
 int pspLogEnabled = 0;
+char pspDbgLog[0x4000]; // (debugging: the "PSP dbg" lines, read with savemem; see PrintLog)
+unsigned int pspDbgUsed;
 #endif
 
 void RSDK::PrintLog(int32 mode, const char *message, ...)
@@ -123,6 +125,11 @@ void RSDK::PrintLog(int32 mode, const char *message, ...)
         // every enemy kill, achievement or profiler report). Once the first scene starts, lines are kept in RAM
         // and written out at scene changes (see PSPFlushLog); during boot they still go straight to the card.
         size_t len = strlen(outputString);
+        // debugging lines ("PSP dbg ...") are also kept, oldest first, where the 32KB ring can't push them out
+        if (!strncmp(outputString, "PSP dbg", 7) && pspDbgUsed + len < sizeof(pspDbgLog)) {
+            memcpy(&pspDbgLog[pspDbgUsed], outputString, len);
+            pspDbgUsed += len;
+        }
         if (!pspLogToCard) {
             if (len > sizeof(pspLogBuffer) / 2)
                 return;

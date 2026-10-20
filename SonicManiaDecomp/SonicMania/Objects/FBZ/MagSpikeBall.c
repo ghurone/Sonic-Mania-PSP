@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------
 
 #include "Game.h"
+#include "PSPFBZSlots.h"
 
 ObjectMagSpikeBall *MagSpikeBall;
 
@@ -28,8 +29,16 @@ void MagSpikeBall_Update(void)
 
         bool32 collided = RSDK.ObjectTileCollision(self, Zone->collisionLayers, CMODE_FLOOR, 0, 0, 0xC0000, true);
 
+#if defined(__psp__)
+        PSPFBZSlots *platforms = PSPFBZ_Slots(PSP_FBZ_MAGPLATFORM); // (see PSPFBZSlots.h)
+        for (int32 i = 0; i < platforms->count; ++i) {
+            EntityMagPlatform *platform = RSDK_GET_ENTITY(platforms->slots[i], MagPlatform);
+            if (platform->classID != MagPlatform->classID)
+                continue;
+#else
         foreach_all(MagPlatform, platform)
         {
+#endif
             platform->position.x = platform->drawPos.x - platform->collisionOffset.x;
             platform->position.y = platform->drawPos.y - platform->collisionOffset.y;
             Hitbox *hitbox       = RSDK.GetHitbox(&platform->animator, 0);

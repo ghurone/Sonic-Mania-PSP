@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------
 
 #include "Game.h"
+#include "PSPFBZSlots.h"
 
 ObjectElectroMagnet *ElectroMagnet;
 
@@ -125,8 +126,16 @@ void ElectroMagnet_State_MagnetActive(void)
     else {
         self->timer--;
 
+#if defined(__psp__)
+        PSPFBZSlots *blasters = PSPFBZ_Slots(PSP_FBZ_BLASTER); // (see PSPFBZSlots.h)
+        for (int32 i = 0; i < blasters->count; ++i) {
+            EntityBlaster *blaster = RSDK_GET_ENTITY(blasters->slots[i], Blaster);
+            if (blaster->classID != Blaster->classID)
+                continue;
+#else
         foreach_all(Blaster, blaster)
         {
+#endif
             if (RSDK.CheckObjectCollisionTouchBox(blaster, &ElectroMagnet->hitboxPlayer, self, &self->hitboxMagnetRange)
                 && blaster->animator.animationID < 2 && blaster->state != Blaster_State_Init) {
                 blaster->state  = Blaster_State_MagnetAttract;
@@ -134,16 +143,32 @@ void ElectroMagnet_State_MagnetActive(void)
             }
         }
 
+#if defined(__psp__)
+        PSPFBZSlots *spikeBalls = PSPFBZ_Slots(PSP_FBZ_MAGSPIKEBALL);
+        for (int32 i = 0; i < spikeBalls->count; ++i) {
+            EntityMagSpikeBall *spikeBall = RSDK_GET_ENTITY(spikeBalls->slots[i], MagSpikeBall);
+            if (spikeBall->classID != MagSpikeBall->classID)
+                continue;
+#else
         foreach_all(MagSpikeBall, spikeBall)
         {
+#endif
             if (RSDK.CheckObjectCollisionTouchBox(spikeBall, &ElectroMagnet->hitboxPlayer, self, &self->hitboxMagnetRange)) {
                 spikeBall->direction = FLIP_X;
                 spikeBall->active    = ACTIVE_NORMAL;
             }
         }
 
+#if defined(__psp__)
+        PSPFBZSlots *platforms = PSPFBZ_Slots(PSP_FBZ_MAGPLATFORM);
+        for (int32 i = 0; i < platforms->count; ++i) {
+            EntityMagPlatform *platform = RSDK_GET_ENTITY(platforms->slots[i], MagPlatform);
+            if (platform->classID != MagPlatform->classID)
+                continue;
+#else
         foreach_all(MagPlatform, platform)
         {
+#endif
             if (RSDK.CheckObjectCollisionTouchBox(platform, &ElectroMagnet->hitboxPlayer, self, &self->hitboxMagnetRange)) {
                 platform->state  = MagPlatform_State_Rise;
                 platform->active = ACTIVE_NORMAL;

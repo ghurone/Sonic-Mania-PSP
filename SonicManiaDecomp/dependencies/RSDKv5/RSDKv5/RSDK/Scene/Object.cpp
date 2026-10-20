@@ -146,6 +146,10 @@ void PSPReportClassProfile(uint32 frames)
         PrintLog(PRINT_NORMAL, "PSP roto parts/frame: index rows %uus, blankmap %uus, ge rows %uus (%u rows)", (uint32)(pspRotoIndexUS / frames),
                  (uint32)(pspRotoBlankUS / frames), (uint32)(pspGenItemUS / frames), (uint32)(pspGenInitUS / frames));
         pspRotoIndexUS = pspRotoBlankUS = pspGenItemUS = pspGenInitUS = 0;
+        extern unsigned int pspRotoFlatCount;
+        if (pspRotoFlatCount)
+            PrintLog(PRINT_NORMAL, "PSP roto rows without rotation/frame: %u (one line each)", pspRotoFlatCount / frames);
+        pspRotoFlatCount = 0;
         extern unsigned int pspRotoPageRows, pspRotoPageLines, pspRotoPageCopies;
         if (pspRotoPageRows)
             PrintLog(PRINT_NORMAL, "PSP roto pages/frame: rows=%u lines=%u tile copies=%u.%02u", pspRotoPageRows / frames, pspRotoPageLines / frames,

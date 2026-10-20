@@ -1197,6 +1197,16 @@ void RSDK::DrawLine(int32 x1, int32 y1, int32 x2, int32 y2, uint32 color, int32 
             break;
     }
 }
+#if RETRO_PLATFORM == RETRO_PSP
+// Whether the rectangle shows on the current screen: the software paths set validDraw (an entity's onScreen) only once
+// their clipped size is above 0, and so must the GE ones (objects wait for onScreen to drop: Metal Sonic's ball attack in
+// SSZ2 never ended while every off-screen sprite counted as on screen).
+static inline bool32 PSPRectOnScreen(int32 x, int32 y, int32 width, int32 height)
+{
+    return x < currentScreen->clipBound_X2 && x + width > currentScreen->clipBound_X1 && y < currentScreen->clipBound_Y2
+           && y + height > currentScreen->clipBound_Y1;
+}
+#endif
 void RSDK::DrawRectangle(int32 x, int32 y, int32 width, int32 height, uint32 color, int32 alpha, int32 inkEffect, bool32 screenRelative)
 {
     switch (inkEffect) {
@@ -1238,7 +1248,8 @@ void RSDK::DrawRectangle(int32 x, int32 y, int32 width, int32 height, uint32 col
                             { TO_FIXED(x), TO_FIXED(y + height) } };
         if (inkEffect == INK_MASKED) {
             if (PSPQueueMaskedRect(x, y, x + width, y + height, color & 0xFFFFFF)) {
-                validDraw = true;
+                if (PSPRectOnScreen(x, y, width, height))
+                    validDraw = true;
                 return;
             }
         }
@@ -3109,7 +3120,8 @@ void RSDK::DrawSpriteFlipped(int32 x, int32 y, int32 width, int32 height, int32 
     }
 #if RETRO_PLATFORM == RETRO_PSP
     if (PSPQueueSpriteRect(x, y, width, height, sprX, sprY, direction, inkEffect, alpha, sheetID)) {
-        validDraw = true;
+        if (PSPRectOnScreen(x, y, width, height))
+            validDraw = true;
         return;
     }
 #endif
