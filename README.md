@@ -56,8 +56,8 @@ The rest of this page is for doing it on your own computer.
 
 ## Requirements
 
-- A **PSP with 64MB of RAM and CFW**: PSP-2000, PSP-3000 or PSP Go. Tested on a PSP-3000 and a PSP Go. The PSP-1000
-  (32MB) and the PSP Street (E1000, 32MB) do not have enough memory.
+- A **PSP with 64MB of RAM and CFW**: PSP-2000, PSP-3000, PSP Go or PSP Street (E1000). Tested on a PSP-3000 and a
+  PSP Go. The PSP-1000 (32MB) does not have enough memory.
 - The game asks the CFW for the PSP's extra memory by itself. If it does not boot (seen on a PSP Go), turn on the
   CFW's **extra memory** option (in ARK, the extra memory / +16MB setting).
 - The **`Data.rsdk` of Sonic Mania Plus** (version 1.06, the Steam one), found in the game's install folder.
