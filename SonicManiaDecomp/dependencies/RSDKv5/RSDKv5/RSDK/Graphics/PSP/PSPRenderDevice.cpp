@@ -426,6 +426,8 @@ static void PSPGeClearDepth(ScreenInfo *screen)
     sceGuSendCommandi(211, 0);
 }
 
+static bool PSPGeItemMasked(const PSPGe3DItem *item);
+
 extern int pspRotoPagesDebug; // (debugging, boot.txt pagesdbg=N: 1 page lines untextured, 2 from the atlas, 3 not drawn, 4 unswizzled)
 // (debugging, boot.txt dumpframes: the GE batches of the frames being dumped)
 #define PSP_DUMPING (pspDumpStart >= 0 && pspDumpCount > 0 && pspFrameIndex >= pspDumpStart)
@@ -643,7 +645,8 @@ static void PSPKick3DEx(bool wait, bool mid)
                 sceGuDisable(GU_DEPTH_TEST);
                 sceGuDepthMask(GU_FALSE);
                 sceGuDepthFunc(GU_GEQUAL); // what the models expect
-                if (pspGe3DUsesDepth)
+                // (not while the next item is masked too: it relies on this mask, see PSPGeMaskNewItem)
+                if (pspGe3DUsesDepth && !(i + 1 < pspGe3DItemCount && PSPGeItemMasked(&pspGe3DItems[i + 1])))
                     PSPGeClearDepth(screen);
             }
             texturing  = true;
@@ -761,7 +764,7 @@ static void PSPKick3DEx(bool wait, bool mid)
                 sceGuDepthMask(GU_FALSE);
                 sceGuDrawArray(GU_SPRITES, GU_COLOR_8888 | GU_VERTEX_16BIT | GU_TRANSFORM_2D, item->count, 0, &pspGe3DArena[item->offset]);
                 sceGuDisable(GU_DEPTH_TEST);
-                if (pspGe3DUsesDepth)
+                if (pspGe3DUsesDepth && !(i + 1 < pspGe3DItemCount && PSPGeItemMasked(&pspGe3DItems[i + 1])))
                     PSPGeClearDepth(screen);
                 continue;
             }
@@ -1907,7 +1910,7 @@ static PSPRotoCellMap *pspRotoCells;
 // are copied in, all before this layer's lines are queued - when the previous frame's lists are done reading them
 // (PSPWaitDisplayList, before any drawing). The textures live in the stage's storage (no VRAM is left; the special
 // stages leave ~6MB of it unused), taken only while there is room without moving anything else.
-int pspRotoPagesOn  = 0; // off: in UFO7 some batches with page lines were dropped by the GE (floor and more vanished); boot.txt "pageson" turns it on (testing), "nopages" off
+int pspRotoPagesOn  = 1; // boot.txt "nopages" turns it off, "pageson" on
 int pspRotoPageMin  = 6; // boot.txt pagemin=N: only rows averaging at least N pixels per tile (farther ones minify: slow for the GE from RAM)
 int pspRotoPageMax  = 12; // boot.txt pages=N: textures at most
 int pspRotoPagesNoDraw = 0;
@@ -3250,7 +3253,11 @@ int32 RSDK::PSPQueueDeformedSprite(uint16 sheetID, int32 inkEffect, int32 alpha)
         // (the same item as the line before while it has the same palette bank and room: nothing else was queued)
         const uint32 bytes = pieces * 2 * sizeof(PSPGeSpriteTriVertex);
         if (!item || itemBank != gfxLineBuffer[y] || pspGe3DArenaUsed + bytes > PSP_GE3D_ARENA || &pspGe3DItems[pspGe3DItemCount - 1] != item) {
-            item = PSPGeSpriteItem(tex, 512, PSP_SPRITE_CACHE_ROWS, gfxLineBuffer[y], inkEffect, bytes, true, masked);
+            // a masked item that starts a new batch (the arena filled up mid-screen) needs its own mask item: without
+            // it the rest of the screen tested against a cleared depth buffer and the sheet covered everything below
+            // (UFO7's plasma over the whole track)
+            item = masked ? PSPGeMaskedSpriteItem(tex, 512, PSP_SPRITE_CACHE_ROWS, gfxLineBuffer[y], inkEffect, bytes, true)
+                          : PSPGeSpriteItem(tex, 512, PSP_SPRITE_CACHE_ROWS, gfxLineBuffer[y], inkEffect, bytes, true, masked);
             if (!item)
                 return y;
             itemBank = gfxLineBuffer[y];
