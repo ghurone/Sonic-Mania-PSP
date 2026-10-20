@@ -1,6 +1,6 @@
 # Sonic Mania PSP
 
-A port of **Sonic Mania Plus** to the **PSP** (tested on a PSP-3000 with CFW), built on top of the
+A port of **Sonic Mania Plus** to the **PSP** (tested on a PSP-3000 and a PSP Go with CFW), built on top of the
 [Sonic Mania decompilation](https://github.com/RSDKModding/Sonic-Mania-Decompilation) and the
 [RSDKv5 engine decompilation](https://github.com/RSDKModding/RSDKv5-Decompilation), both by RSDKModding.
 
@@ -45,7 +45,8 @@ The git history keeps the original code and the port's changes in separate commi
 
 The notebook does everything below in Google's cloud, for free, with nothing to install: you upload your `Data.rsdk`
 (or pick it from Google Drive), click **Runtime → Run all**, and about 20 minutes later you download
-`SonicManiaPSP.zip`. Extract it to the root of your Memory Stick and you are done.
+`SonicManiaPSP.zip`. Extract it to the root of your Memory Stick and you are done. If the game does not boot, turn on
+the extra memory option of your CFW (see [Requirements](#requirements)).
 
 The notebook uses the EBOOT from the latest [release](https://github.com/ghurone/Sonic-Mania-PSP/releases), which is
 built **without the Plus content** (Encore Mode, Mighty and Ray), as the RSDKv5 license requires of pre-built
@@ -55,8 +56,10 @@ The rest of this page is for doing it on your own computer.
 
 ## Requirements
 
-- A **PSP with 64MB of RAM and CFW**: PSP-2000, PSP-3000 or PSP Go. Only the PSP-3000 has been tested. The PSP-1000
-  (32MB) does not have enough memory.
+- A **PSP with 64MB of RAM and CFW**: PSP-2000, PSP-3000 or PSP Go. Tested on a PSP-3000 and a PSP Go. The PSP-1000
+  (32MB) and the PSP Street (E1000, 32MB) do not have enough memory.
+- The game asks the CFW for the PSP's extra memory by itself. If it does not boot (seen on a PSP Go), turn on the
+  CFW's **extra memory** option (in ARK, the extra memory / +16MB setting).
 - The **`Data.rsdk` of Sonic Mania Plus** (version 1.06, the Steam one), found in the game's install folder.
 - **Python 3** with the `numpy`, `pillow` and `lz4` packages:
   ```
