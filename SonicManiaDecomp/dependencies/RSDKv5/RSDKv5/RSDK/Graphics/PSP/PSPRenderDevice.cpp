@@ -2611,6 +2611,11 @@ bool32 RSDK::PSPQueueLayerRotozoom(TileLayer *layer)
     return true;
 }
 
+// INK_SUB in software takes away the source's complement, (31 - channel) * alpha, not the source (Drawing.cpp's
+// subtractLookupTable): the GE subtracts the colour given, so that is the inverted one (GHZ2's pools, 0xA0E8F0, were
+// drawn black instead of blue).
+static inline uint32 PSPGe3DSubColor(uint32 abgr, int32 inkEffect) { return inkEffect == INK_SUB ? abgr ^ 0x00FFFFFF : abgr; }
+
 // The software rasterizer's ink handling: the ink to draw with, INK_COUNT-style -1 when the GE can't do it (tint,
 // masked...), -2 when nothing would be drawn. alpha is adjusted the same way DrawFace does.
 int32 RSDK::PSPGe3DInk(int32 inkEffect, int32 *alpha)
@@ -2757,16 +2762,19 @@ struct PSPGeSpriteTriVertex {
     float x, y, z;
 };
 
-// A palette bank's CLUT for this batch, shared by every sprite using the bank while it doesn't change.
-static uint16 pspGeClutPalette[PALETTE_BANK_COUNT][PALETTE_BANK_SIZE];
-static uint32 pspGeClutBatch[PALETTE_BANK_COUNT], pspGeClutOffset[PALETTE_BANK_COUNT];
+// A palette bank's CLUT for this batch, shared by every sprite using the bank while it doesn't change. INK_SUB sprites
+// have their own (the bank inverted, see PSPGe3DSubColor), kept after the plain ones.
+static uint16 pspGeClutPalette[PALETTE_BANK_COUNT * 2][PALETTE_BANK_SIZE];
+static uint32 pspGeClutBatch[PALETTE_BANK_COUNT * 2], pspGeClutOffset[PALETTE_BANK_COUNT * 2];
 
-static void PSPGeWriteClut(uint32 *clut, int32 bank)
+static void PSPGeWriteClut(uint32 *clut, int32 bank, bool invert)
 {
     const uint16 *colors = fullPalette[bank];
     clut[0]              = 0; // transparent
     for (int32 c = 1; c < 0x100; ++c) {
         uint32 color = colors[c]; // R in the low bits, like the GE's 5650
+        if (invert)
+            color ^= 0xFFFF;
         uint32 r = color & 0x1F, g = (color >> 5) & 0x3F, b = (color >> 11) & 0x1F;
         clut[c] = 0xFF000000 | (((b << 3) | (b >> 2)) << 16) | (((g << 2) | (g >> 4)) << 8) | ((r << 3) | (r >> 2));
     }
@@ -2862,11 +2870,12 @@ static PSPGe3DItem *PSPGeSpriteItem(const void *tex, int32 tbw, int32 texH, int3
 
     for (int32 attempt = 0; attempt < 2; ++attempt) {
         PSPGe3DItem *last = pspGe3DItemCount ? &pspGe3DItems[pspGe3DItemCount - 1] : NULL;
-        bool clutValid    = pspGeClutBatch[bank] == pspGe3DBatchId && !memcmp(pspGeClutPalette[bank], fullPalette[bank], sizeof(pspGeClutPalette[bank]));
+        const int32 clut  = bank + (ink == INK_SUB ? PALETTE_BANK_COUNT : 0);
+        bool clutValid    = pspGeClutBatch[clut] == pspGe3DBatchId && !memcmp(pspGeClutPalette[clut], fullPalette[bank], sizeof(pspGeClutPalette[clut]));
         if (last && last->type == PSP_GE3D_SPRITE && last->tex == tex && last->tbw == tbw && last->texH == texH && last->prim == bank && last->inkEffect == ink
             && last->rects == rects && last->masked == masked && clutValid && last->scissored == scissored
             && (!scissored || (last->sx1 == clip.x1 && last->sy1 == clip.y1 && last->sx2 == clip.x2 && last->sy2 == clip.y2))
-            && last->clutOffset == pspGeClutOffset[bank] && last->offset + last->count * sizeof(PSPGeSpriteTriVertex) == pspGe3DArenaUsed
+            && last->clutOffset == pspGeClutOffset[clut] && last->offset + last->count * sizeof(PSPGeSpriteTriVertex) == pspGe3DArenaUsed
             && pspGe3DArenaUsed + bytes <= PSP_GE3D_ARENA)
             return last;
 
@@ -2880,10 +2889,10 @@ static PSPGe3DItem *PSPGeSpriteItem(const void *tex, int32 tbw, int32 texH, int3
 
         if (!clutValid) {
             uint32 clutOffset = (pspGe3DArenaUsed + 15) & ~15;
-            PSPGeWriteClut((uint32 *)&pspGe3DArena[clutOffset], bank);
-            memcpy(pspGeClutPalette[bank], fullPalette[bank], sizeof(pspGeClutPalette[bank]));
-            pspGeClutBatch[bank]  = pspGe3DBatchId;
-            pspGeClutOffset[bank] = clutOffset;
+            PSPGeWriteClut((uint32 *)&pspGe3DArena[clutOffset], bank, ink == INK_SUB);
+            memcpy(pspGeClutPalette[clut], fullPalette[bank], sizeof(pspGeClutPalette[clut]));
+            pspGeClutBatch[clut]  = pspGe3DBatchId;
+            pspGeClutOffset[clut] = clutOffset;
             pspGe3DArenaUsed      = clutOffset + 1024;
         }
 
@@ -2891,7 +2900,7 @@ static PSPGe3DItem *PSPGeSpriteItem(const void *tex, int32 tbw, int32 texH, int3
         item->type        = PSP_GE3D_SPRITE;
         item->inkEffect   = ink;
         item->prim        = bank;
-        item->clutOffset  = pspGeClutOffset[bank];
+        item->clutOffset  = pspGeClutOffset[clut];
         item->tex         = tex;
         item->tbw         = tbw;
         item->texH        = texH;
@@ -3332,9 +3341,10 @@ static int32 PSPClipPolygon(const PSPClipVertex *in, int32 count, PSPClipVertex 
 // Queues one screen-space face (16.16 positions, as DrawFace/DrawBlendedFace take them). colors: one 0xRRGGBB per
 // vertex, or NULL for a flat face of flatColor. Returns false when the face needs the software path (the caller then
 // draws it there, which flushes the batch first).
+int pspGeFaces = 1; // boot.txt "nogefaces": faces and rectangles drawn in software (for comparisons)
 bool32 RSDK::PSPQueue3DFace(Vector2 *vertices, uint32 *colors, uint32 flatColor, int32 vertCount, int32 alpha, int32 inkEffect)
 {
-    if (vertCount < 3 || vertCount > 4)
+    if (!pspGeFaces || vertCount < 3 || vertCount > 4)
         return false;
 
     inkEffect = PSPGe3DInk(inkEffect, &alpha);
@@ -3391,7 +3401,7 @@ bool32 RSDK::PSPQueue3DFace(Vector2 *vertices, uint32 *colors, uint32 flatColor,
         out->y                 = (int16)(bufA[v].y + 0.5f);
         out->z                 = 0;
         out->pad               = 0;
-        out->color             = ((uint32)alpha << 24) | ((uint32)bufA[v].b << 16) | ((uint32)bufA[v].g << 8) | (uint32)bufA[v].r;
+        out->color             = PSPGe3DSubColor(((uint32)alpha << 24) | ((uint32)bufA[v].b << 16) | ((uint32)bufA[v].g << 8) | (uint32)bufA[v].r, inkEffect);
     }
 
     for (int32 t = 1; t + 1 < count; ++t) {

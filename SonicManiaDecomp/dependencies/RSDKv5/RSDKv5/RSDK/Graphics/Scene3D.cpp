@@ -690,7 +690,7 @@ static bool32 PSPDrawModelRecord(PSPModelRecord *record, Scene3D *scn, Entity *e
 {
     int32 alpha = entity->alpha;
     int32 ink   = PSPGe3DInk(entity->inkEffect, &alpha);
-    if (ink == -1)
+    if (ink == -1 || ink == INK_SUB) // (INK_SUB takes away the colours' complement: left to the software, see PSPGe3DSubColor)
         return false;
     if (ink == -2)
         return true;

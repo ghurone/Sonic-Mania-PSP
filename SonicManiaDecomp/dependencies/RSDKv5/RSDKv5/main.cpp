@@ -86,6 +86,7 @@ int pspProfDetail = 0; // boot.txt "prof" (see PSPProfFine)
 int pspLogFiles = 0; // boot.txt "logfiles": LoadFile logs every file it opens (to lay Data.psp out in load order)
 extern "C" int pspSkipShadows = 0; // boot.txt "noshadows": UFO_Shadow draws nothing (to measure what shadows cost)
 extern "C" int pspStartStarPostX = 0; // boot.txt starpost=X: start at the StarPost at x=X (testing, StarPost.c)
+extern "C" int pspStartX = 0, pspStartY = 0; // boot.txt startxy=X,Y: start at that position (testing, StarPost.c)
 extern "C" int pspUfoInfiniteTime = 0; // boot.txt "ufotime": the special stages' rings stop draining (testing)
 extern "C" int pspShadowChunk = 1; // boot.txt shadowchunk=N: UFO shadows N to a 3D scene (UFO_Shadow.c; 1: each its own, as the original)
 extern "C" int pspShadowBatchOff = 0; // boot.txt "noshadowbatch": one 3D scene per shadow, as the original (to compare)
@@ -201,6 +202,10 @@ int main(int argc, char *argv[])
             pspFrameCheck = 1;
         if (strstr(bootArgs, "nogemodels"))
             pspGeModels = 0;
+        if (strstr(bootArgs, "nogefaces")) {
+            extern int pspGeFaces;
+            pspGeFaces = 0;
+        }
         if (strstr(bootArgs, "stopat="))
             pspReplayStopAt = atoi(strstr(bootArgs, "stopat=") + 7);
         if (strstr(bootArgs, "prof"))
@@ -249,6 +254,12 @@ int main(int argc, char *argv[])
         }
         if (strstr(bootArgs, "starpost="))
             pspStartStarPostX = atoi(strstr(bootArgs, "starpost=") + 9);
+        if (strstr(bootArgs, "startxy=")) {
+            const char *xy = strstr(bootArgs, "startxy=") + 8;
+            pspStartX      = atoi(xy);
+            if (strchr(xy, ','))
+                pspStartY = atoi(strchr(xy, ',') + 1);
+        }
         if (strstr(bootArgs, "ufotime"))
             pspUfoInfiniteTime = 1;
         if (strstr(bootArgs, "shadowchunk="))

@@ -90,7 +90,18 @@ void StarPost_StageLoad(void)
 
 #if defined(__psp__)
     // boot.txt starpost=X (testing): the stage starts at the StarPost at x=X, as if it had been touched
-    extern int pspStartStarPostX;
+    extern int pspStartStarPostX, pspStartX, pspStartY;
+    // boot.txt startxy=X,Y (testing): the stage starts with the player there, through the first StarPost
+    if (pspStartX > 0 && !StarPost->postIDs[0]) {
+        foreach_all(StarPost, post)
+        {
+            StarPost->postIDs[0]           = RSDK.GetEntitySlot(post);
+            StarPost->playerPositions[0].x = TO_FIXED(pspStartX);
+            StarPost->playerPositions[0].y = TO_FIXED(pspStartY);
+            StarPost->playerDirections[0]  = FLIP_NONE;
+            foreach_break;
+        }
+    }
     if (pspStartStarPostX > 0 && !StarPost->postIDs[0]) {
         foreach_all(StarPost, post)
         {
