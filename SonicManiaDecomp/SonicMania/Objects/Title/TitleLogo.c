@@ -9,9 +9,6 @@
 
 ObjectTitleLogo *TitleLogo;
 
-#if defined(__PSP__)
-static uint32 pspTitleDrawMask;
-#endif
 
 void TitleLogo_Update(void)
 {
@@ -40,18 +37,6 @@ void TitleLogo_Draw(void)
 {
     RSDK_THIS(TitleLogo);
 
-#if defined(__PSP__)
-    if (!(pspTitleDrawMask & (1u << (self->type & 31))) && self->type < 32) {
-        pspTitleDrawMask |= 1u << (self->type & 31);
-        SpriteFrame *frame = self->mainAnimator.frames ? &self->mainAnimator.frames[self->mainAnimator.frameID] : NULL;
-        LogHelpers_Print("PSP diagnostic: TitleLogo draw type=%d pos=%d,%d active=%d visible=%d ani=%d anim=%d frame=%d/%d valid=%d size=%dx%d pivot=%d,%d src=%d,%d sheet=%d screen=%dx%d pitch=%d",
-                         self->type, self->position.x >> 16, self->position.y >> 16, self->active, self->visible, TitleLogo->aniFrames,
-                         self->mainAnimator.animationID, self->mainAnimator.frameID, self->mainAnimator.frameCount, frame != NULL,
-                         frame ? frame->width : 0, frame ? frame->height : 0, frame ? frame->pivotX : 0, frame ? frame->pivotY : 0,
-                         frame ? frame->sprX : 0, frame ? frame->sprY : 0, frame ? frame->sheetID : 0, ScreenInfo->size.x,
-                         ScreenInfo->size.y, ScreenInfo->pitch);
-    }
-#endif
 
     switch (self->type) {
         case TITLELOGO_EMBLEM:
@@ -95,9 +80,6 @@ void TitleLogo_Create(void *data)
 {
     RSDK_THIS(TitleLogo);
 
-#if defined(__PSP__)
-    LogHelpers_Print("PSP diagnostic: TitleLogo create type=%d pos=%d,%d", self->type, self->position.x >> 16, self->position.y >> 16);
-#endif
 
     self->drawFX = FX_FLIP;
 

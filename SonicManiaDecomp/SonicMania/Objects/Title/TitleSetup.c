@@ -50,9 +50,6 @@ void TitleSetup_Create(void *data)
 
 void TitleSetup_StageLoad(void)
 {
-#if defined(__PSP__)
-    LogHelpers_Print("PSP diagnostic: TitleSetup stage load");
-#endif
     String presence;
     Localization_GetString(&presence, STR_RPC_TITLE);
     API_SetRichPresence(PRESENCE_TITLE, &presence);
@@ -159,9 +156,6 @@ void TitleSetup_State_AnimateUntilFlash(void)
     RSDK.ProcessAnimation(&self->animator);
 
     if (self->animator.frameID == 31) {
-#if defined(__PSP__)
-        LogHelpers_Print("PSP diagnostic: ring animation reached frame 31");
-#endif
         foreach_all(TitleLogo, titleLogo)
         {
             if (titleLogo->type >= TITLELOGO_EMBLEM) {
@@ -185,16 +179,8 @@ void TitleSetup_State_FlashIn(void)
 
     RSDK.ProcessAnimation(&self->animator);
     if (self->animator.frameID == self->animator.frameCount - 1) {
-#if defined(__PSP__)
-        int32 pspLogoCount = 0;
-#endif
         foreach_all(TitleLogo, titleLogo)
         {
-#if defined(__PSP__)
-            ++pspLogoCount;
-            LogHelpers_Print("PSP diagnostic: activate logo type=%d pos=%d,%d", titleLogo->type, titleLogo->position.x >> 16,
-                             titleLogo->position.y >> 16);
-#endif
 #if MANIA_USE_PLUS
             if (titleLogo->type == TITLELOGO_PLUS) {
                 titleLogo->position.y -= 0x200000;
@@ -220,9 +206,6 @@ void TitleSetup_State_FlashIn(void)
         }
 
         TitleBG_SetupFX();
-#if defined(__PSP__)
-        LogHelpers_Print("PSP diagnostic: flash complete, logo count=%d", pspLogoCount);
-#endif
         self->timer     = 0x300;
         self->state     = TitleSetup_State_WaitForSonic;
         self->stateDraw = TitleSetup_Draw_Flash;

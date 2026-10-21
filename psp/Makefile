@@ -62,6 +62,8 @@ $(ENG)/RSDK/Input/Input.o: $(ENG)/RSDK/Input/PSP/PSPInputDevice.cpp
 $(ENG)/RSDK/Scene/Scene.o: $(ENG)/RSDK/Scene/PSP/PSPTileRows.hpp $(ENG)/RSDK/Scene/PSP/PSPHScrollReference.inl $(ENG)/RSDK/Scene/PSP/PSPHScrollTextured.inl $(ENG)/RSDK/Scene/Scene.hpp
 $(ENG)/RSDK/Scene/Scene.o: $(ENG)/RSDK/Scene/PSP/PSPHScrollHybrid.inl $(ENG)/RSDK/Scene/PSP/PSPBasicRows.inl $(ENG)/RSDK/Scene/PSP/PSPRotozoomGroups.inl $(ENG)/RSDK/Scene/PSP/PSPTitleReference.inl $(ENG)/RSDK/Scene/PSP/PSPTitleCompare.inl
 $(ENG)/RSDK/Scene/Object.o: $(ENG)/RSDK/Scene/Scene.hpp
+# All.c includes every object's .c (and .h): rebuild it when any of them changes
+$(GAME)/Objects/All.o: $(wildcard $(GAME)/Objects/*/*.c $(GAME)/Objects/*/*.h)
 
 PSP_HSCROLL_OPT ?= 1
 # 1: re-time the layer routines in-game (extra layer redraws: visible hitches), for diagnostics only
