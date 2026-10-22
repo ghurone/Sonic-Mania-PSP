@@ -2031,7 +2031,7 @@ static bool PSPRotoPagesReady(TileLayer *layer)
         }
         pspRotoPageCount = count;
         pspRotoPageMemAt = NULL;
-        PrintLog(PRINT_NORMAL, "PSP rotozoom pages: %d (%d KB of stage storage, %p-%p; pool %p-%p)", count, count * PSP_ROTO_PAGE_BYTES >> 10,
+        PrintLog(PRINT_NORMAL, "PSP dbg rotozoom pages: %d (%d KB of stage storage, %p-%p; pool %p-%p)", count, count * PSP_ROTO_PAGE_BYTES >> 10,
                  pspRotoPageMem, (uint8 *)pspRotoPageMem + count * PSP_ROTO_PAGE_BYTES + 64, storage->memoryTable,
                  (uint8 *)storage->memoryTable + storage->storageLimit);
     }

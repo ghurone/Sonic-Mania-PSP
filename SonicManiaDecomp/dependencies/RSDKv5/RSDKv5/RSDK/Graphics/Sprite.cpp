@@ -1358,8 +1358,13 @@ uint16 RSDK::LoadSpriteSheet(const char *filename, uint8 scope)
         // or with mods that use a lot of spritesheets.
         // As a last resort, let's try a new allocation in TMP for surface->pixels.
         // NOTE: This is a workaround, and will still cause a crash if the TMP allocation fails as well.
-        if (!surface->pixels)
+        if (!surface->pixels) {
+#if RETRO_PLATFORM == RETRO_PSP
+            // (temporary storage is reused by later loads: the sheet's pixels get overwritten, its sprites vanish)
+            PrintLog(PRINT_NORMAL, "PSP dbg stage storage full: sheet %s (%dx%d) went to temporary storage", fullFilePath, surface->width, surface->height);
+#endif
             AllocateStorage((void **)&surface->pixels, surface->width * surface->height, DATASET_TMP, false);
+        }
 #endif
         image.pixels = surface->pixels;
         image.Load(NULL, false);

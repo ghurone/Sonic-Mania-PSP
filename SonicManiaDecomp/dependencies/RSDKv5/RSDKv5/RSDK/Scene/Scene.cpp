@@ -89,6 +89,9 @@ char RSDK::currentSceneID[0x10];
 
 SceneInfo RSDK::sceneInfo;
 
+#if RETRO_PLATFORM == RETRO_PSP
+extern int pspLatePageFree; // (boot.txt "latepagefree": the rotozoom pages freed as before issue #4, to compare)
+#endif
 void RSDK::LoadSceneFolder()
 {
 #if RETRO_PLATFORM == RETRO_PSP && PSP_TILE_BENCH
@@ -100,6 +103,13 @@ void RSDK::LoadSceneFolder()
 #endif
 #if RETRO_PLATFORM == RETRO_ANDROID
     ShowLoadingIcon();
+#endif
+#if RETRO_PLATFORM == RETRO_PSP
+    // the rotozoom pages' stage storage (3MB) is let go before the storage is collected below: freed only with the next
+    // scene's tiles, it outlived the collection, and the stage after a special stage loaded with that much less (MMZ's
+    // Global/Objects.gif found no room: spikes and more were invisible, issue #4)
+    if (!pspLatePageFree)
+        PSPRotoFreeMaps();
 #endif
 
 #if RETRO_USE_MOD_LOADER
@@ -209,6 +219,10 @@ void RSDK::LoadSceneFolder()
     // Clear stage storage
     DefragmentAndGarbageCollectStorage(DATASET_STG);
     DefragmentAndGarbageCollectStorage(DATASET_SFX);
+#if RETRO_PLATFORM == RETRO_PSP
+    PrintLog(PRINT_NORMAL, "PSP dbg stage storage after unload: %u of %u KB", (dataStorage[DATASET_STG].usedStorage * (uint32)sizeof(uint32)) >> 10,
+             dataStorage[DATASET_STG].storageLimit >> 10);
+#endif
 
     for (int32 s = 0; s < SCREEN_COUNT; ++s) {
         screens[s].position.x = 0;
