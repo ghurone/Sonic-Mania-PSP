@@ -76,6 +76,10 @@ void android_main(struct android_app *ap)
 }
 #elif RETRO_PLATFORM == RETRO_PSP
 #include <pspsdk.h>
+#include <pspkernel.h>
+#include <pspge.h>
+#include <pspiofilemgr.h>
+#include <unistd.h>
 #include <malloc.h>
 PSP_MODULE_INFO("SonicMania", PSP_MODULE_USER, 1, 0);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU);
@@ -88,10 +92,95 @@ extern "C" int pspSkipShadows = 0; // boot.txt "noshadows": UFO_Shadow draws not
 extern "C" int pspStartStarPostX = 0; // boot.txt starpost=X: start at the StarPost at x=X (testing, StarPost.c)
 int pspLatePageFree = 0; // boot.txt "latepagefree": rotozoom pages freed with the next tiles, as before issue #4 (testing)
 extern "C" int pspStartX = 0, pspStartY = 0; // boot.txt startxy=X,Y: start at that position (testing, StarPost.c)
+extern "C" int pspDebugMode = 0; // boot.txt "debugmode": the game's debug mode, square to fly around (testing, Player.c)
 extern "C" int pspUfoInfiniteTime = 0; // boot.txt "ufotime": the special stages' rings stop draining (testing)
 extern "C" int pspShadowChunk = 1; // boot.txt shadowchunk=N: UFO shadows N to a 3D scene (UFO_Shadow.c; 1: each its own, as the original)
 extern "C" int pspShadowBatchOff = 0; // boot.txt "noshadowbatch": one 3D scene per shadow, as the original (to compare)
 extern "C" int pspSmogTest = 0; // boot.txt "smogtest": OOZ's smog always on (Smog.c), to measure it
+
+// Freeze report: a watchdog thread wakes once a second, and when no frame has been finished for 10 seconds (a scene
+// loads in 2-3 at most) it writes freeze.txt next to Data.psp, once a freeze: what the main thread was doing, what the
+// threads wait on, the music decoder, the scene and the newest "PSP dbg" lines. Players send it with their report. It
+// costs a few microseconds a second.
+#define PSP_PORT_VERSION "1.0.6"
+volatile const char *pspPhase = "boot";
+// boot.txt freezetest=N (testing the freeze report and the decoder's isolation), 600 frames into the first scene:
+// 1 the main thread blocks on the mixer's lock, 2 the audio thread stays in the music decoder (RetroEngine.cpp, Audio.cpp)
+int pspFreezeTest = 0;
+extern int32 pspFrameIndex;
+extern char pspDbgLog[0x4000];
+extern unsigned int pspDbgUsed;
+void PSPAudioDescribe(char *out, int32 size, SceUID *audioThread); // Audio.cpp
+static SceUID pspMainThread = -1;
+static char pspFreezePath[0x140];
+
+static int32 PSPDescribeThread(SceUID uid, const char *label, char *out, int32 size)
+{
+    SceKernelThreadInfo info;
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    if (uid < 0 || sceKernelReferThreadStatus(uid, &info) < 0)
+        return snprintf(out, size, "%s thread: ?\n", label);
+    return snprintf(out, size, "%s thread: status %d, wait type %d on %08X\n", label, info.status, info.waitType, info.waitId);
+}
+
+static void PSPWriteFreezeReport(int32 seconds)
+{
+    static char report[0x6000];
+    int32 n = 0, size = sizeof(report) - 1;
+    n += snprintf(report + n, size - n, "Sonic Mania PSP %s (built %s %s) freeze report\n", PSP_PORT_VERSION, __DATE__, __TIME__);
+    n += snprintf(report + n, size - n, "no new frame for %d s (frame %d), main thread: %s\n", seconds, pspFrameIndex, (const char *)pspPhase);
+    if (RSDK::sceneInfo.listData && RSDK::sceneInfo.listPos >= 0)
+        n += snprintf(report + n, size - n, "scene: %s (%s), camera at %d,%d, entity slot %d class %d\n",
+                      RSDK::sceneInfo.listData[RSDK::sceneInfo.listPos].name, RSDK::sceneInfo.listData[RSDK::sceneInfo.listPos].folder,
+                      RSDK::screens[0].position.x, RSDK::screens[0].position.y, RSDK::sceneInfo.entitySlot,
+                      RSDK::sceneInfo.entity ? RSDK::sceneInfo.entity->classID : -1);
+    SceUID audioThread = -1;
+    char audio[0x300];
+    PSPAudioDescribe(audio, sizeof(audio), &audioThread);
+    n += PSPDescribeThread(pspMainThread, "main", report + n, size - n);
+    n += PSPDescribeThread(audioThread, "audio", report + n, size - n);
+    n += snprintf(report + n, size - n, "%sGE: %d (0 idle)\n\nnewest log lines:\n", audio, sceGeDrawSync(1));
+    n = MIN(n, size);
+    uint32 keep = MIN(pspDbgUsed, (uint32)(size - n));
+    memcpy(report + n, &pspDbgLog[pspDbgUsed - keep], keep);
+    n += keep;
+    SceUID fd = sceIoOpen(pspFreezePath, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+    if (fd >= 0) {
+        sceIoWrite(fd, report, n);
+        sceIoClose(fd);
+    }
+}
+
+static int PSPWatchdog(SceSize args, void *argp)
+{
+    int32 last = -1, still = 0;
+    for (;;) {
+        sceKernelDelayThread(1000000);
+        int32 frame = pspFrameIndex;
+        if (frame != last) {
+            last  = frame;
+            still = 0;
+            continue;
+        }
+        if (++still == 10)
+            PSPWriteFreezeReport(still);
+    }
+    return 0;
+}
+
+static void PSPStartWatchdog()
+{
+    pspMainThread = sceKernelGetThreadId();
+    char dir[0x100];
+    if (!getcwd(dir, sizeof(dir)))
+        dir[0] = 0;
+    snprintf(pspFreezePath, sizeof(pspFreezePath), "%s%sfreeze.txt", dir, dir[0] ? "/" : "");
+    // above the audio thread (0x12) and the main thread (0x20): it must run whatever they do
+    SceUID thread = sceKernelCreateThread("rsdk_watch", PSPWatchdog, 0x11, 0x4000, PSP_THREAD_ATTR_USER, NULL);
+    if (thread >= 0)
+        sceKernelStartThread(thread, 0, NULL);
+}
 
 // boot.txt "iobench": Memory Stick read speed from Data.psp - sequential at several request sizes, and small random reads
 static void PSPMemoryStickBench()
@@ -265,6 +354,10 @@ int main(int argc, char *argv[])
             if (strchr(xy, ','))
                 pspStartY = atoi(strchr(xy, ',') + 1);
         }
+        if (strstr(bootArgs, "freezetest="))
+            pspFreezeTest = atoi(strstr(bootArgs, "freezetest=") + 11);
+        if (strstr(bootArgs, "debugmode"))
+            pspDebugMode = 1;
         if (strstr(bootArgs, "ufotime"))
             pspUfoInfiniteTime = 1;
         if (strstr(bootArgs, "shadowchunk="))
@@ -396,6 +489,7 @@ int main(int argc, char *argv[])
         RSDK::PrintLog(RSDK::PRINT_NORMAL, "PSP clock cost: sceRtcGetCurrentTick %u ns, sceKernelGetSystemTimeLow %u ns", (uint32)(t1 - t0),
                        (uint32)(t2 - t1));
     }
+    PSPStartWatchdog();
     int32 code = RSDK_main(argc, argv, (void *)LinkGameLogic);
     RSDK::PrintLog(RSDK::PRINT_NORMAL, "RSDK_main returned %d", code);
     PSPSaveInputRecording();

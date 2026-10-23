@@ -637,6 +637,8 @@ extern int pspRotoSegment, pspRotoCheck, pspRotoStrips, pspRotoGeRun, pspEmuGeLa
 extern unsigned int pspRotoIndexRows;
 void PSPKick3DIfIdle(); // between objects' draws (PSPRenderDevice.cpp)
 void PSPRotoFreeMaps(); // the rotozoom cell map, on scene loads (PSPRenderDevice.cpp)
+// what the main thread is doing, for a freeze report (main.cpp): a constant string, set at the main steps
+extern volatile const char *pspPhase;
 extern int pspGeKickKB;
 extern unsigned int pspGeIdleKicks, pspGeBusySkips; // rotozoom layers drawn from a whole-layer texture: pixels per line; self-check
 extern int pspGeLayers; // tile layers drawn by the GE (boot.txt "nogelayers" turns it off)

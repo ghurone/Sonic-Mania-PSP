@@ -27,7 +27,10 @@ void AudioDevice::LockDevice()
 
     // game-side callers (PlaySfx, channel attributes...): account for time spent waiting on the mixer
     PSP_PROF_BEGIN(PSPPROF_AUDLOCK);
+    const char *phase = (const char *)pspPhase;
+    pspPhase          = "audio lock";
     sceKernelWaitSema(pspAudioSema, 1, NULL);
+    pspPhase = phase;
     PSP_PROF_END(PSPPROF_AUDLOCK);
 }
 

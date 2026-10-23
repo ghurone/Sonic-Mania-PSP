@@ -695,6 +695,12 @@ void Player_StageLoad(void)
         globals->playerID = RSDK.CheckSceneFolder("MSZCutscene") ? ID_KNUCKLES : ID_DEFAULT_PLAYER;
 
     SceneInfo->debugMode = globals->medalMods & MEDAL_DEBUGMODE;
+#if defined(__psp__)
+    // boot.txt "debugmode" (testing): the game's debug mode (square: fly around, positions on the HUD)
+    extern int pspDebugMode;
+    if (pspDebugMode)
+        SceneInfo->debugMode = true;
+#endif
 #if MANIA_USE_PLUS
     RSDK.AddViewableVariable("Debug Mode", &SceneInfo->debugMode, VIEWVAR_BOOL, false, true);
 #endif

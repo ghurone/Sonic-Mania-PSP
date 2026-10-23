@@ -94,6 +94,9 @@ extern int pspLatePageFree; // (boot.txt "latepagefree": the rotozoom pages free
 #endif
 void RSDK::LoadSceneFolder()
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    pspPhase = "scene load";
+#endif
 #if RETRO_PLATFORM == RETRO_PSP && PSP_TILE_BENCH
     memset(pspTileBench, 0, sizeof(pspTileBench));
     pspHScrollOptimizedMask = 0;
@@ -371,6 +374,9 @@ void RSDK::LoadSceneFolder()
 }
 void RSDK::LoadSceneAssets()
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    pspPhase = "scene assets load";
+#endif
 #if RETRO_PLATFORM == RETRO_ANDROID
     ShowLoadingIcon();
 #endif

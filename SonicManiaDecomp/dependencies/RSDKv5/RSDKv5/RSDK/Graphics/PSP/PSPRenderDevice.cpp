@@ -196,7 +196,10 @@ void PSPWaitDisplayList()
 
     PSP_PROF_BEGIN(PSPPROF_GUWAIT);
     unsigned long long start = sceKernelGetSystemTimeWide();
+    const char *phase        = (const char *)pspPhase;
+    pspPhase                 = "frame blit wait";
     sceGuSync(0, 0);
+    pspPhase = phase;
     pspGeWaitedUS += sceKernelGetSystemTimeWide() - start;
     PSP_PROF_END(PSPPROF_GUWAIT);
     pspGuReading = false;
@@ -320,11 +323,16 @@ static void PSPSetGe3DInk(int32 inkEffect)
     }
 }
 
+extern int pspFreezeTest; // (main.cpp)
+
 // Waits for the GE like sceGuSync, but logs (and writes the log out) if it takes absurdly long, so a hang leaves a trace.
 static void PSPGeWait(const char *what)
 {
     unsigned long long start = PSPProfNow();
+    const char *phase        = (const char *)pspPhase;
+    pspPhase                 = what; // ("flush", "overlap": waiting for the GE)
     sceGeDrawSync(0); // the GE's interrupt wakes us as soon as it is done
+    pspPhase = phase;
     pspGeWaitedUS += PSPProfNow() - start;
     if (PSPProfNow() - start > 300000) {
         PrintLog(PRINT_NORMAL, "PSP GE slow in %s: %u us", what, (uint32)(PSPProfNow() - start));
@@ -3696,6 +3704,12 @@ static inline void PSPDrawScreen(int32 s, int32 dx, int32 dy, int32 dw, int32 dh
 
 void RenderDevice::FlipScreen()
 {
+    pspPhase = "present";
+    if (pspFreezeTest == 1 && pspFrameIndex == 600) { // (testing: the main thread waits on the mixer's lock forever)
+        PrintLog(PRINT_NORMAL, "PSP dbg freezetest: the main thread takes the mixer's lock twice");
+        AudioDevice::LockDevice();
+        AudioDevice::LockDevice();
+    }
     if (windowRefreshDelay > 0) {
         windowRefreshDelay--;
         if (!windowRefreshDelay)

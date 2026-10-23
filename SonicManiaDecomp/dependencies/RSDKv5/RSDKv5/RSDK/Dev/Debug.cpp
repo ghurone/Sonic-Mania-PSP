@@ -36,15 +36,40 @@ static bool pspLogBuffered = false; // false until the first PSPFlushLog(): boot
 // play logs nothing at all (not even to RAM). Test runs write log.txt, or keep the newest 32KB in RAM with "nolog".
 int pspLogToCard = 0;
 int pspLogEnabled = 0;
-char pspDbgLog[0x4000]; // (debugging: the "PSP dbg" lines, read with savemem; see PrintLog)
+char pspDbgLog[0x4000]; // the "PSP dbg" lines, the newest kept (read with savemem; in a freeze report, main.cpp)
 unsigned int pspDbgUsed;
+
+// Keeps a "PSP dbg" line, making room by dropping the older half when full.
+static void PSPKeepDbgLine(const char *line, size_t len)
+{
+    if (len > sizeof(pspDbgLog) / 2)
+        return;
+    if (pspDbgUsed + len > sizeof(pspDbgLog)) {
+        memmove(pspDbgLog, &pspDbgLog[sizeof(pspDbgLog) / 2], pspDbgUsed - sizeof(pspDbgLog) / 2);
+        pspDbgUsed -= sizeof(pspDbgLog) / 2;
+    }
+    memcpy(&pspDbgLog[pspDbgUsed], line, len);
+    pspDbgUsed += len;
+}
 #endif
 
 void RSDK::PrintLog(int32 mode, const char *message, ...)
 {
 #if RETRO_PLATFORM == RETRO_PSP
-    if (!pspLogEnabled)
+    if (!pspLogEnabled) {
+        // normal play logs nothing but the few "PSP dbg" lines (scene and music changes...), for a freeze report
+        if (strncmp(message, "PSP dbg", 7))
+            return;
+        char line[0x200];
+        va_list args;
+        va_start(args, message);
+        int32 len = vsnprintf(line, sizeof(line) - 1, message, args);
+        va_end(args);
+        len = MIN(MAX(len, 0), (int32)sizeof(line) - 2);
+        line[len++] = '\n';
+        PSPKeepDbgLine(line, len);
         return;
+    }
 #endif
 #if !RETRO_DISABLE_LOG
     if (engineDebugMode) {
@@ -125,11 +150,9 @@ void RSDK::PrintLog(int32 mode, const char *message, ...)
         // every enemy kill, achievement or profiler report). Once the first scene starts, lines are kept in RAM
         // and written out at scene changes (see PSPFlushLog); during boot they still go straight to the card.
         size_t len = strlen(outputString);
-        // debugging lines ("PSP dbg ...") are also kept, oldest first, where the 32KB ring can't push them out
-        if (!strncmp(outputString, "PSP dbg", 7) && pspDbgUsed + len < sizeof(pspDbgLog)) {
-            memcpy(&pspDbgLog[pspDbgUsed], outputString, len);
-            pspDbgUsed += len;
-        }
+        // debugging lines ("PSP dbg ...") are also kept apart, where the 32KB ring of the rest can't push them out
+        if (!strncmp(outputString, "PSP dbg", 7))
+            PSPKeepDbgLine(outputString, len);
         if (!pspLogToCard) {
             if (len > sizeof(pspLogBuffer) / 2)
                 return;

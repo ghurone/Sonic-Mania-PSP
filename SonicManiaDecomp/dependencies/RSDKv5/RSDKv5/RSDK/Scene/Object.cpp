@@ -579,6 +579,9 @@ void RSDK::InitObjects()
 }
 void RSDK::ProcessObjects()
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    pspPhase = "objects update";
+#endif
     for (int32 i = 0; i < DRAWGROUP_COUNT; ++i) drawGroups[i].entityCount = 0;
 
     for (int32 o = 0; o < sceneInfo.classCount; ++o) {
@@ -1013,6 +1016,9 @@ void RSDK::ProcessFrozenObjects()
 }
 void RSDK::ProcessObjectDrawLists()
 {
+#if RETRO_PLATFORM == RETRO_PSP
+    pspPhase = "objects draw";
+#endif
 #if RETRO_PLATFORM == RETRO_PSP
     // the previous frame's display list samples the framebuffers we are about to draw over
     PSPWaitDisplayList();
