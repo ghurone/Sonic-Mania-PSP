@@ -152,9 +152,9 @@ void RSDK::AllocateStorage(void **dataPtr, uint32 size, StorageDataSets dataSet,
                 // We've run out of room, so perform defragmentation and garbage-collection.
 #if RETRO_PLATFORM == RETRO_PSP
                 // (blocks move: raw pointers into them taken earlier, like a static animator's frames, go stale)
-                if (dataSet == DATASET_STG)
-                    PrintLog(PRINT_NORMAL, "PSP dbg stage storage full (%u KB used, %u more wanted): collected and moved",
-                             (storage->usedStorage * (uint32)sizeof(uint32)) >> 10, size >> 10);
+                if (dataSet == DATASET_STG || dataSet == DATASET_STR)
+                    PrintLog(PRINT_NORMAL, "PSP dbg %s storage full (%u KB used, %u more wanted): collected and moved",
+                             dataSet == DATASET_STG ? "stage" : "string", (storage->usedStorage * (uint32)sizeof(uint32)) >> 10, size >> 10);
 #endif
                 DefragmentAndGarbageCollectStorage(dataSet);
 

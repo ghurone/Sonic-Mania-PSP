@@ -323,7 +323,7 @@ static void PSPSetGe3DInk(int32 inkEffect)
     }
 }
 
-extern int pspFreezeTest; // (main.cpp)
+extern int pspFreezeTest, pspStringGCTest; // (main.cpp)
 
 // Waits for the GE like sceGuSync, but logs (and writes the log out) if it takes absurdly long, so a hang leaves a trace.
 static void PSPGeWait(const char *what)
@@ -3705,6 +3705,21 @@ static inline void PSPDrawScreen(int32 s, int32 dx, int32 dy, int32 dw, int32 dh
 void RenderDevice::FlipScreen()
 {
     pspPhase = "present";
+    if (pspStringGCTest && pspFrameIndex % 120 == 119) { // (testing: as if the strings' storage had filled up)
+        // the entities' strings the collector is about to take for unused: registered to a slot that no longer points at them
+        DataStorage *strings = &dataStorage[DATASET_STR];
+        int32 orphans = 0, owned = 0;
+        for (uint32 e = 0; e < strings->entryCount; ++e) {
+            uint8 *owner = (uint8 *)strings->dataEntries[e];
+            if (owner >= (uint8 *)objectEntityList && owner < (uint8 *)&objectEntityList[ENTITY_COUNT]) {
+                ++owned;
+                if (*strings->dataEntries[e] != strings->storageEntries[e])
+                    ++orphans;
+            }
+        }
+        PrintLog(PRINT_NORMAL, "PSP dbg strgc: frame %d, %d entity strings, %d orphaned; collected", pspFrameIndex, owned, orphans);
+        DefragmentAndGarbageCollectStorage(DATASET_STR);
+    }
     if (pspFreezeTest == 1 && pspFrameIndex == 600) { // (testing: the main thread waits on the mixer's lock forever)
         PrintLog(PRINT_NORMAL, "PSP dbg freezetest: the main thread takes the mixer's lock twice");
         AudioDevice::LockDevice();

@@ -107,6 +107,9 @@ volatile const char *pspPhase = "boot";
 // boot.txt freezetest=N (testing the freeze report and the decoder's isolation), 600 frames into the first scene:
 // 1 the main thread blocks on the mixer's lock, 2 the audio thread stays in the music decoder (RetroEngine.cpp, Audio.cpp)
 int pspFreezeTest = 0;
+// boot.txt "strgc": the strings' storage collected every 120 frames (testing the scene strings' owners, Scene.cpp);
+// "oldstrings": the owners left where the scene was read, as before issue #6
+int pspStringGCTest = 0, pspOldStringOwners = 0;
 extern int32 pspFrameIndex;
 extern char pspDbgLog[0x4000];
 extern unsigned int pspDbgUsed;
@@ -354,6 +357,10 @@ int main(int argc, char *argv[])
             if (strchr(xy, ','))
                 pspStartY = atoi(strchr(xy, ',') + 1);
         }
+        if (strstr(bootArgs, "strgc"))
+            pspStringGCTest = 1;
+        if (strstr(bootArgs, "oldstrings"))
+            pspOldStringOwners = 1;
         if (strstr(bootArgs, "freezetest="))
             pspFreezeTest = atoi(strstr(bootArgs, "freezetest=") + 11);
         if (strstr(bootArgs, "debugmode"))

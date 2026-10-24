@@ -91,6 +91,7 @@ SceneInfo RSDK::sceneInfo;
 
 #if RETRO_PLATFORM == RETRO_PSP
 extern int pspLatePageFree; // (boot.txt "latepagefree": the rotozoom pages freed as before issue #4, to compare)
+extern int pspOldStringOwners; // (boot.txt "oldstrings": the scene strings' owners as before issue #6, to compare)
 #endif
 void RSDK::LoadSceneFolder()
 {
@@ -793,10 +794,18 @@ void RSDK::LoadSceneAssets()
 
 #if RETRO_REV02
         // handle filter and stuff
+#if RETRO_PLATFORM == RETRO_PSP
+        // where each entity read from the scene ends up (-1: dropped by the filter), for its strings (below)
+        static int16 pspSceneMovedTo[SCENEENTITY_COUNT], pspTempMovedTo[SCENEENTITY_COUNT];
+        for (int32 i = 0; i < SCENEENTITY_COUNT; ++i) pspSceneMovedTo[i] = pspTempMovedTo[i] = -1;
+#endif
         EntityBase *entity = &objectEntityList[RESERVE_ENTITY_COUNT];
         int32 activeSlot   = RESERVE_ENTITY_COUNT;
         for (int32 i = RESERVE_ENTITY_COUNT; i < SCENEENTITY_COUNT + RESERVE_ENTITY_COUNT; ++i) {
             if (sceneInfo.filter & entity->filter) {
+#if RETRO_PLATFORM == RETRO_PSP
+                pspSceneMovedTo[i - RESERVE_ENTITY_COUNT] = activeSlot;
+#endif
                 if (i != activeSlot) {
                     memcpy(&objectEntityList[activeSlot], entity, sizeof(EntityBase));
                     memset(entity, 0, sizeof(EntityBase));
@@ -812,12 +821,51 @@ void RSDK::LoadSceneAssets()
         }
 
         for (int32 i = 0; i < tempEntityCount; ++i) {
-            if (sceneInfo.filter & tempEntityList[i].filter)
+            if (sceneInfo.filter & tempEntityList[i].filter) {
+#if RETRO_PLATFORM == RETRO_PSP
+                pspTempMovedTo[i] = activeSlot;
+#endif
                 memcpy(&objectEntityList[activeSlot++], &tempEntityList[i], sizeof(EntityBase));
+            }
 
             if (activeSlot >= SCENEENTITY_COUNT + RESERVE_ENTITY_COUNT)
                 break;
         }
+
+#if RETRO_PLATFORM == RETRO_PSP
+        // The strings read from the scene (LEDPanel's text sequences...) are registered as owned by the slot their entity
+        // was read into: moved by the filter above, the entity left its strings looking unused to the collector. It
+        // frees them once the strings' storage fills up (128KB here, 2MB on PC: rarely so there), and the entity reads on
+        // from memory given to others: LEDPanel's sequence loop never ended (SPZ1 froze, issues #5 and #6). The owners
+        // follow the entities now (the dropped ones' strings are freed as before).
+        if (!pspOldStringOwners) {
+            DataStorage *strings = &dataStorage[DATASET_STR];
+            uint8 *sceneStart = (uint8 *)&objectEntityList[RESERVE_ENTITY_COUNT];
+            uint8 *sceneEnd   = (uint8 *)&objectEntityList[RESERVE_ENTITY_COUNT + SCENEENTITY_COUNT];
+            uint8 *tempStart  = (uint8 *)tempEntityList;
+            uint8 *tempEnd    = (uint8 *)&tempEntityList[tempEntityCount];
+            int32 moved       = 0;
+            for (uint32 e = 0; e < strings->entryCount; ++e) {
+                uint8 *owner = (uint8 *)strings->dataEntries[e];
+                int32 to = -1, offset = 0;
+                if (owner >= sceneStart && owner < sceneEnd) {
+                    int32 i = (int32)((owner - sceneStart) / sizeof(EntityBase));
+                    offset  = (int32)((owner - sceneStart) % sizeof(EntityBase));
+                    to      = pspSceneMovedTo[i] == i + RESERVE_ENTITY_COUNT ? -1 : pspSceneMovedTo[i];
+                }
+                else if (owner >= tempStart && owner < tempEnd) {
+                    int32 i = (int32)((owner - tempStart) / sizeof(EntityBase));
+                    offset  = (int32)((owner - tempStart) % sizeof(EntityBase));
+                    to      = pspTempMovedTo[i];
+                }
+                if (to >= 0) {
+                    strings->dataEntries[e] = (uint32 **)((uint8 *)&objectEntityList[to] + offset);
+                    ++moved;
+                }
+            }
+            PrintLog(PRINT_NORMAL, "PSP dbg scene strings moved with their entities: %d", moved);
+        }
+#endif
 
 #if !RETRO_USE_ORIGINAL_CODE
         RemoveStorageEntry((void **)&tempEntityList);
