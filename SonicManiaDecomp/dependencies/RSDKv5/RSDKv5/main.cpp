@@ -102,7 +102,7 @@ extern "C" int pspSmogTest = 0; // boot.txt "smogtest": OOZ's smog always on (Sm
 // loads in 2-3 at most) it writes freeze.txt next to Data.psp, once a freeze: what the main thread was doing, what the
 // threads wait on, the music decoder, the scene and the newest "PSP dbg" lines. Players send it with their report. It
 // costs a few microseconds a second.
-#define PSP_PORT_VERSION "1.0.6"
+#define PSP_PORT_VERSION "1.0.7"
 volatile const char *pspPhase = "boot";
 // boot.txt freezetest=N (testing the freeze report and the decoder's isolation), 600 frames into the first scene:
 // 1 the main thread blocks on the mixer's lock, 2 the audio thread stays in the music decoder (RetroEngine.cpp, Audio.cpp)
