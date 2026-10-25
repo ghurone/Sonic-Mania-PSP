@@ -1,6 +1,7 @@
 # Sonic Mania PSP
 
-A port of **Sonic Mania Plus** to the **PSP** (tested on a PSP-3000 and a PSP Go with CFW), built on top of the
+A port of **Sonic Mania Plus** to the **PSP** (tested on a PSP-3000 and a PSP Go with CFW, and on the
+[PPSSPP](https://www.ppsspp.org/) emulator), built on top of the
 [Sonic Mania decompilation](https://github.com/RSDKModding/Sonic-Mania-Decompilation) and the
 [RSDKv5 engine decompilation](https://github.com/RSDKModding/RSDKv5-Decompilation), both by RSDKModding.
 
@@ -97,6 +98,14 @@ This produces `psp/EBOOT.PBP`. The PSP menu's icon, background image and sound a
 
 Create the folder `PSP/GAME/SonicMania/` on the Memory Stick and copy `EBOOT.PBP` and `Data.psp` into it.
 
+### Playing on PPSSPP
+
+The game also runs on [PPSSPP](https://www.ppsspp.org/) (tested on 1.20.4, Vulkan) with the default settings: the
+**hardware renderer** works, no need to switch to the software renderer. Put the same `SonicMania` folder in
+PPSSPP's `memstick/PSP/GAME/` (or open `EBOOT.PBP` from anywhere) and keep the emulated PSP model at its default,
+PSP-2000/3000 (the game needs its 64MB). This needs an EBOOT newer than v1.0.8: older ones only drew the special
+stages' track and the title screen background with the software renderer.
+
 ## Status
 
 - Mania Mode, Encore Mode and Time Attack work, and the regular stages run at 60 fps.
@@ -104,3 +113,5 @@ Create the folder `PSP/GAME/SonicMania/` on the Memory Stick and copy `EBOOT.PBP
   the screen, and the pinball bonus stage runs at ~55 fps.
 - Rarely, the PSP freezes as the intro video starts (the Media Engine stops responding). If it happens, restart the
   game.
+- On PPSSPP the game runs with the hardware renderer at 60 fps, special stages included. It is made for, and
+  measured on, real PSP hardware, though: performance on an emulator depends on your computer.
