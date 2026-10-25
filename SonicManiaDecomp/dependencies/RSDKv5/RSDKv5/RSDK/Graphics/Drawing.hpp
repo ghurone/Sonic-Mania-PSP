@@ -401,6 +401,8 @@ PSPGe3DModelVertex *PSPGe3DUncached(PSPGe3DModelVertex *verts);
 int32 PSPGe3DInk(int32 inkEffect, int32 *alpha);
 // queues a screen-space face; false: draw it in software
 bool32 PSPQueue3DFace(Vector2 *vertices, uint32 *colors, uint32 flatColor, int32 vertCount, int32 alpha, int32 inkEffect);
+// queues a screen-space line (whole pixels, ends included), in an emulator only; false: draw it in software
+bool32 PSPQueue3DLine(int32 x1, int32 y1, int32 x2, int32 y2, uint32 color, int32 alpha, int32 inkEffect);
 // a whole model: fill the returned vertices (lit, untransformed), then give its triangle indices, world*view matrix,
 // projection shifts and on-screen bounds. NULL: draw it in software.
 // scene: one id per Draw3DScene call; each gets its own slice of the depth buffer, later ones in front (the software

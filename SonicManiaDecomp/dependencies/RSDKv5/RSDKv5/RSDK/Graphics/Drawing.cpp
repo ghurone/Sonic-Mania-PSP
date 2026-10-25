@@ -667,9 +667,6 @@ void RSDK::FillScreen(uint32 color, int32 alphaR, int32 alphaG, int32 alphaB)
 
 void RSDK::DrawLine(int32 x1, int32 y1, int32 x2, int32 y2, uint32 color, int32 alpha, int32 inkEffect, bool32 screenRelative)
 {
-#if RETRO_PLATFORM == RETRO_PSP
-    PSP_FLUSH_3D();
-#endif
     switch (inkEffect) {
         default: break;
 
@@ -705,6 +702,12 @@ void RSDK::DrawLine(int32 x1, int32 y1, int32 x2, int32 y2, uint32 color, int32 
         drawX2 = FROM_FIXED(x2) - currentScreen->position.x;
         drawY2 = FROM_FIXED(y2) - currentScreen->position.y;
     }
+
+#if RETRO_PLATFORM == RETRO_PSP
+    if (PSPQueue3DLine(drawX1, drawY1, drawX2, drawY2, color, alpha, inkEffect))
+        return;
+    PSP_FLUSH_3D();
+#endif
 
     int32 flags1 = 0;
     if (drawX1 >= currentScreen->clipBound_X2)

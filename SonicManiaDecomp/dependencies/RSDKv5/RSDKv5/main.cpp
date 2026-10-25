@@ -90,6 +90,7 @@ int pspProfDetail = 0; // boot.txt "prof" (see PSPProfFine)
 int pspLogFiles = 0; // boot.txt "logfiles": LoadFile logs every file it opens (to lay Data.psp out in load order)
 extern "C" int pspSkipShadows = 0; // boot.txt "noshadows": UFO_Shadow draws nothing (to measure what shadows cost)
 extern "C" int pspStartStarPostX = 0; // boot.txt starpost=X: start at the StarPost at x=X (testing, StarPost.c)
+int pspEmuNoTris = 0; // boot.txt "emulines": in an emulator, rotozoom as before (CPU, or "emuge" lines) to compare
 int pspLatePageFree = 0; // boot.txt "latepagefree": rotozoom pages freed with the next tiles, as before issue #4 (testing)
 extern "C" int pspStartX = 0, pspStartY = 0; // boot.txt startxy=X,Y: start at that position (testing, StarPost.c)
 extern "C" int pspDebugMode = 0; // boot.txt "debugmode": the game's debug mode, square to fly around (testing, Player.c)
@@ -358,6 +359,8 @@ int main(int argc, char *argv[])
             if (strchr(xy, ','))
                 pspStartY = atoi(strchr(xy, ',') + 1);
         }
+        if (strstr(bootArgs, "emulines"))
+            pspEmuNoTris = 1;
         if (strstr(bootArgs, "strgc"))
             pspStringGCTest = 1;
         if (strstr(bootArgs, "oldstrings"))

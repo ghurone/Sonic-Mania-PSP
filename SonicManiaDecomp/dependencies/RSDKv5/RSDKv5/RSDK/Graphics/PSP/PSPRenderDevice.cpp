@@ -416,6 +416,10 @@ static void PSPGe3DUseFirstArena()
 
 // mid: kicked mid-frame without waiting, the CPU going on with the other arena (PSPKick3DMid)
 static void PSPKick3DEx(bool wait, bool mid);
+static void PSPEmuDrawLines(const void *verts, int32 count);
+static int32 pspEmuTrisUsed;
+int pspEmuLineTris = 0; // set in an emulator (PSPEmuDrawLines); boot.txt "emulines" keeps the lines there
+extern int pspEmuNoTris; // (main.cpp)
 static void PSPKick3D(bool wait) { PSPKick3DEx(wait, false); }
 
 // Models in a batch draw on depth cleared to 0: put it back over what a mask item set (see PSP_GE3D_MASK)
@@ -463,6 +467,8 @@ static void PSPKick3DEx(bool wait, bool mid)
         PSPGeWait("overlap"); // one batch on the GE at a time (the other arena is then free again)
         pspGe3DInFlight = false;
     }
+
+    pspEmuTrisUsed = 0; // (the GE is done with them: the batch before was waited for, above or at the frame's start)
 
     ScreenInfo *screen = pspGe3DScreen;
     int32 x1 = pspGe3DX1, y1 = pspGe3DY1;
@@ -706,6 +712,8 @@ static void PSPKick3DEx(bool wait, bool mid)
                 sceGuDrawArray(GU_TRIANGLE_STRIP, GU_TEXTURE_32BITF | GU_VERTEX_16BIT | GU_TRANSFORM_2D, item->count, 0, &pspGe3DArena[item->offset]);
             else if (item->prim == GU_LINES && item->clamped && pspRotoPagesDebug == 3)
                 ; // (debugging: the state set, nothing drawn)
+            else if (item->prim == GU_LINES && pspEmuLineTris)
+                PSPEmuDrawLines(&pspGe3DArena[item->offset], item->count);
             else if (item->prim == GU_LINES)
                 sceGuDrawArray(GU_LINES, GU_TEXTURE_32BITF | GU_VERTEX_16BIT | GU_TRANSFORM_2D, item->count, 0, &pspGe3DArena[item->offset]);
             else
@@ -1030,6 +1038,35 @@ struct PSPGeLineVertex {
     int16 x, y, z;
     int16 pad;
 };
+
+// In an emulator the rotozoom segments are drawn as triangles: a segment's two ends, and the same ends one row down,
+// make a 1-pixel-tall quad with the same texture coordinates along it. PPSSPP's renderers don't rasterize lines like the
+// PSP's GE: the software one draws their last pixel too (a texel of the next tile), the hardware ones drew whole rows of
+// the special stages' floor wrong. Triangles they all draw as the GE draws the lines. The vertices go in a buffer of
+// their own (emulator only), refilled at each batch: a kick first waits for the batch before it (PSPKick3DEx), and the
+// buffer holds the triangles of an arena full of segments. (Segments past its room would stay lines.)
+#define PSP_EMU_TRIS ((int32)(3 * PSP_GE3D_ARENA / sizeof(PSPGeLineVertex)))
+static PSPGeLineVertex *pspEmuTris;
+static void PSPEmuDrawLines(const void *verts, int32 count)
+{
+    const PSPGeLineVertex *line = (const PSPGeLineVertex *)verts;
+    if (!pspEmuTris)
+        pspEmuTris = (PSPGeLineVertex *)memalign(64, PSP_EMU_TRIS * sizeof(PSPGeLineVertex));
+    int32 segments = pspEmuTris ? MIN(count / 2, (PSP_EMU_TRIS - pspEmuTrisUsed) / 6) : 0;
+    if (segments > 0) {
+        PSPGeLineVertex *tri = &pspEmuTris[pspEmuTrisUsed];
+        for (int32 n = 0; n < segments; ++n, line += 2, tri += 6) {
+            tri[0] = line[0], tri[1] = line[1], tri[2] = line[0];
+            tri[3] = line[1], tri[4] = line[1], tri[5] = line[0];
+            tri[2].y++, tri[4].y++, tri[5].y++;
+        }
+        sceKernelDcacheWritebackRange(&pspEmuTris[pspEmuTrisUsed], segments * 6 * sizeof(PSPGeLineVertex));
+        sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_VERTEX_16BIT | GU_TRANSFORM_2D, segments * 6, 0, &pspEmuTris[pspEmuTrisUsed]);
+        pspEmuTrisUsed += segments * 6;
+    }
+    if (count - segments * 2 > 0)
+        sceGuDrawArray(GU_LINES, GU_TEXTURE_32BITF | GU_VERTEX_16BIT | GU_TRANSFORM_2D, count - segments * 2, 0, line);
+}
 
 // The layer item to append to for this palette bank and primitive, starting a new one (with a snapshot of the bank as
 // the CLUT, like the software path reading the palette while drawing) when needed. Guarantees room for reserveBytes
@@ -3422,6 +3459,38 @@ bool32 RSDK::PSPQueue3DFace(Vector2 *vertices, uint32 *colors, uint32 flatColor,
     return true;
 }
 
+// A line as a face one pixel thick across its longer axis, both ends included (DrawLine's pixels, to within a pixel
+// along it). In an emulator only: PPSSPP's hardware renderers never saw the CPU's lines in the GE's framebuffer (the
+// special stages' item boxes lost their wireframe cage). On a PSP DrawLine stays the software one.
+bool32 RSDK::PSPQueue3DLine(int32 x1, int32 y1, int32 x2, int32 y2, uint32 color, int32 alpha, int32 inkEffect)
+{
+    if (!pspEmuLineTris)
+        return false;
+
+    const bool across = abs(x2 - x1) >= abs(y2 - y1); // one pixel per column (else one per row)
+    if (across ? x2 < x1 : y2 < y1) {
+        int32 t = x1;
+        x1 = x2, x2 = t;
+        t = y1;
+        y1 = y2, y2 = t;
+    }
+    Vector2 v[4];
+    v[0].x = x1, v[0].y = y1;
+    if (across) {
+        v[1].x = x2 + 1, v[1].y = y2;
+        v[2].x = x2 + 1, v[2].y = y2 + 1;
+        v[3].x = x1, v[3].y = y1 + 1;
+    }
+    else {
+        v[1].x = x1 + 1, v[1].y = y1;
+        v[2].x = x2 + 1, v[2].y = y2 + 1;
+        v[3].x = x2, v[3].y = y2 + 1;
+    }
+    for (int32 n = 0; n < 4; ++n)
+        v[n].x <<= 16, v[n].y <<= 16;
+    return PSPQueue3DFace(v, NULL, color, 4, alpha, inkEffect);
+}
+
 // INK_TINT through a table that inverts every colour (FXRuby's: table[0xFFFF - c] = c): the GE's logic op does exactly
 // that to the screen, so those shapes go to the GE as spans. The table is checked whole whenever it changes pointer, and
 // at a few places on every call.
@@ -3907,6 +3976,16 @@ void RenderDevice::InitVertexBuffer() {}
 bool RenderDevice::InitGraphicsAPI()
 {
     videoSettings.shaderSupport = false;
+
+    // In an emulator: rotozoom layers on the GE as on a PSP, their segments drawn as triangles (PSPEmuDrawLines). The
+    // CPU drew those layers there before, as PPSSPP's lines went wrong; and the hardware renderers never saw the CPU's
+    // pixels in the GE's framebuffer (the special stages' track was missing, issue #3). The overlap stays on: without
+    // it the rows towards the horizon stay on the CPU (PSP_ROTO_GE_RUN), the same missing pixels.
+    if (PSPIsEmulator() && !pspEmuNoTris) {
+        pspEmuLineTris = 1;
+        pspEmuGeLayers = 1;
+        PrintLog(PRINT_NORMAL, "PSP dbg emulator: rotozoom segments as triangles");
+    }
 
     viewSize.x = PSP_SCR_WIDTH;
     viewSize.y = PSP_SCR_HEIGHT;
