@@ -103,8 +103,8 @@ Create the folder `PSP/GAME/SonicMania/` on the Memory Stick and copy `EBOOT.PBP
 The game also runs on [PPSSPP](https://www.ppsspp.org/) (tested on 1.20.4, Vulkan) with the default settings: the
 **hardware renderer** works, no need to switch to the software renderer. Put the same `SonicMania` folder in
 PPSSPP's `memstick/PSP/GAME/` (or open `EBOOT.PBP` from anywhere) and keep the emulated PSP model at its default,
-PSP-2000/3000 (the game needs its 64MB). This needs an EBOOT newer than v1.0.8: older ones only drew the special
-stages' track and the title screen background with the software renderer.
+PSP-2000/3000 (the game needs its 64MB). This needs v1.0.9 or newer: older EBOOTs only drew the special stages'
+track and the title screen background with the software renderer.
 
 ## Status
 
