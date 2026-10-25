@@ -9,6 +9,8 @@ uint8 AudioDevice::contextInitialized;
 
 static SceUID pspAudioSema       = -1;
 static SceUID pspAudioThread     = -1;
+static SceUID pspMusicThread     = -1;
+static volatile bool pspMusicRun = false;
 static int pspAudioChannel       = -1;
 static volatile bool pspAudioRun = false;
 
@@ -20,7 +22,8 @@ void AudioDevice::LockDevice()
     if (pspAudioSema < 0)
         return;
 
-    if (sceKernelGetThreadId() == pspAudioThread) {
+    const SceUID thread = sceKernelGetThreadId();
+    if (thread == pspAudioThread || thread == pspMusicThread) {
         sceKernelWaitSema(pspAudioSema, 1, NULL);
         return;
     }
@@ -49,7 +52,6 @@ int AudioDevice::AudioThread(SceSize args, void *argp)
 
     while (pspAudioRun) {
         short *out = pspOutBuffer[bufIndex];
-        PSPAt3Refill(); // Memory Stick reads stay outside the mixer lock
 
         unsigned long long mixStart = PSPProfNow();
         LockDevice();
@@ -71,6 +73,24 @@ int AudioDevice::AudioThread(SceSize args, void *argp)
         bufIndex ^= 1;
     }
 
+    return 0;
+}
+
+// The music thread: every sceAtrac call (see PSPAt3Request), the Memory Stick reads of the track, and the decoding into
+// the ring the mixer copies from (~185ms of it). Below the mixer, above the game: should the Media Engine stop answering,
+// only the music stops.
+static int PSPMusicThread(SceSize args, void *argp)
+{
+    pspSdkDisableFPUExceptions();
+    while (pspMusicRun) {
+        if (pspAt3Sema >= 0) {
+            sceKernelWaitSema(pspAt3Sema, 1, NULL);
+            PSPAt3Service();
+            sceKernelSignalSema(pspAt3Sema, 1);
+        }
+        PSPAt3Refill(); // (takes pspAt3Sema itself)
+        sceKernelDelayThread(10 * 1000);
+    }
     return 0;
 }
 
@@ -105,6 +125,10 @@ bool32 AudioDevice::Init()
     else {
         PrintLog(PRINT_NORMAL, "ERROR: Unable to create audio thread!");
     }
+    pspMusicRun    = true;
+    pspMusicThread = sceKernelCreateThread("rsdk_music", PSPMusicThread, 0x13, 0x8000, PSP_THREAD_ATTR_USER, NULL);
+    if (pspMusicThread >= 0)
+        sceKernelStartThread(pspMusicThread, 0, NULL);
 
     return true;
 }
@@ -112,6 +136,13 @@ bool32 AudioDevice::Init()
 void AudioDevice::Release()
 {
     pspAudioRun = false;
+    pspMusicRun = false;
+    if (pspMusicThread >= 0) {
+        SceUInt wait = 500000; // (a thread stuck in the Media Engine never ends: left behind)
+        if (sceKernelWaitThreadEnd(pspMusicThread, &wait) >= 0)
+            sceKernelDeleteThread(pspMusicThread);
+        pspMusicThread = -1;
+    }
 
     if (pspAudioThread >= 0) {
         sceKernelWaitThreadEnd(pspAudioThread, NULL);

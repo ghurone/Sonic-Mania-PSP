@@ -113,7 +113,7 @@ int pspStringGCTest = 0, pspOldStringOwners = 0;
 extern int32 pspFrameIndex;
 extern char pspDbgLog[0x4000];
 extern unsigned int pspDbgUsed;
-void PSPAudioDescribe(char *out, int32 size, SceUID *audioThread); // Audio.cpp
+void PSPAudioDescribe(char *out, int32 size, SceUID *audioThread, SceUID *musicThread); // Audio.cpp
 static SceUID pspMainThread = -1;
 static char pspFreezePath[0x140];
 
@@ -138,11 +138,12 @@ static void PSPWriteFreezeReport(int32 seconds)
                       RSDK::sceneInfo.listData[RSDK::sceneInfo.listPos].name, RSDK::sceneInfo.listData[RSDK::sceneInfo.listPos].folder,
                       RSDK::screens[0].position.x, RSDK::screens[0].position.y, RSDK::sceneInfo.entitySlot,
                       RSDK::sceneInfo.entity ? RSDK::sceneInfo.entity->classID : -1);
-    SceUID audioThread = -1;
+    SceUID audioThread = -1, musicThread = -1;
     char audio[0x300];
-    PSPAudioDescribe(audio, sizeof(audio), &audioThread);
+    PSPAudioDescribe(audio, sizeof(audio), &audioThread, &musicThread);
     n += PSPDescribeThread(pspMainThread, "main", report + n, size - n);
     n += PSPDescribeThread(audioThread, "audio", report + n, size - n);
+    n += PSPDescribeThread(musicThread, "music", report + n, size - n);
     n += snprintf(report + n, size - n, "%sGE: %d (0 idle)\n\nnewest log lines:\n", audio, sceGeDrawSync(1));
     n = MIN(n, size);
     uint32 keep = MIN(pspDbgUsed, (uint32)(size - n));
